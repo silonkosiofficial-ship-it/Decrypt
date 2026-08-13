@@ -1,347 +1,369 @@
-
-# NPV Tunnel cloud-config unlocking mechanism — static trace and extraction plan
+# NPV Tunnel cloud-config unlocking mechanism — runtime recovery plan
 
 ## Executive conclusion
 
-The readable JADX and apktool trees do **not** contain the real cloud importer or the cloud unlock/decrypt routine. They contain only the DexProtector bootstrap layer, resource identifiers, native bridge stubs, and third-party SDK code. The protected runtime code is loaded from `assets/classes.dex.dat` by `ProtectedMyApplication` through `libalice.so` and `libdpboot.so`. Therefore the exact cloud algorithm/key is not recoverable from the readable Java/smali alone; it must be recovered by dumping the runtime-unpacked DEX or by hooking the JNI/network/crypto boundaries described below.
+Static analysis has reached the DexProtector protection boundary. The readable JADX and apktool trees expose the bootstrap and the final native tunnel sinks, but not the real cloud importer/unlocker. The next useful step is therefore runtime recovery: dump the protected runtime DEX after DexProtector initialization, analyze that recovered DEX separately, and trace the cloud response through decode/decrypt/parsing into `libnpvtunnel` validation/start calls.
 
-What is provable:
+This update intentionally does **not** continue searching the visible JADX tree for the cloud decryptor. The visible tree is still useful as an anchor for runtime hooks because it identifies the startup sequence, native JNI boundary, and plaintext sink methods.
 
-* `ProtectedMyApplication.attachBaseContext()` loads `libalice.so`, verifies the signing certificate SHA-256, loads `libdpboot.so`, then calls native `uapgpA()`; this is the protector unpack/load stage.
-* `ProtectedMyApplication.onCreate()` derives a 32-byte value from `gwj()` and two hardcoded 256-byte substitution tables, then passes it to native `zInq(Object)`; this is protector key/material handoff, not an app-level cloud key proven by data flow.
-* `ProtectedMyApplication` declares native stream/resource and URL helpers (`zqubf`, `s`, `oGzvwx`) and `MainActivity$d` declares native `HttpURLConnection` builders. Those methods are implemented inside protected native code and are likely involved in loading/decrypting protected assets and remote guard/protector telemetry.
-* No visible call site invokes `libnpvtunnel.decodeBase64()`, `hexDecode()`, `validateV2rayConfig()`, or `validateSshConfig()`; all real app call sites are in protected code.
-* The final tunnel layer is native Go/Xray: `SshTunnel.start(byte[], ...)` and `XrayTunnel.start(byte[], ...)` accept final config bytes, so the best capture point for plaintext is immediately before these JNI calls.
+A Frida runtime recovery harness has been added at `tools/frida/npv_runtime_recovery.js`. It is designed to capture class-loader events, in-memory DEX buffers, file-backed DEX extraction, Java crypto/encoding boundaries, HTTP connection activity, and final `libnpvtunnel` SSH/Xray config sinks.
 
-## 1. Where cloud payload enters memory
+## Current proven boundary
 
-### Visible app entry points
-
-The manifest shows one main launcher/import Activity and one VPN service:
+### Startup chain
 
 ```text
-com.napsternetlabs.napsternetv.kkAhtatwbwcyv     Activity, launcher, ACTION_VIEW file/content import
-com.napsternetlabs.napsternetv.bAEBnrhbzougz     VpnService, BIND_VPN_SERVICE
-```
-
-The same Activity handles `ACTION_VIEW` for `content://` and `file://` and includes `*.npvt` path patterns, proving file import enters through that Activity. Cloud import is evidenced by Compose resource strings (`import_cloud_config`, `export_to_cloud`, `cloud_config_expiry_minutes`, etc.), but the callback class/method is in the protected payload DEX and is not visible statically.
-
-### Protected-code entry point
-
-The real importer is expected in code loaded by this bootstrap chain:
-
-```text
-Application.attachBaseContext(Context)
+ProtectedMyApplication.attachBaseContext(Context)
  ↓
 ProtectedMyApplication$ProtectedMyApplication$a$a.a(Context)
  ↓
 System.loadLibrary("alice")
  ↓
-ProtectedMyApplication.MainActivity.d.a(context)
+ProtectedMyApplication.MainActivity.d.a(Context)
 ProtectedMyApplication.MainActivity.d.a(filesDir)
  ↓
 ProtectedMyApplication.J() certificate SHA-256 check
  ↓
 System.loadLibrary("dpboot")
  ↓
-ProtectedMyApplication.uapgpA()   // native
+ProtectedMyApplication.uapgpA()
  ↓
-Protected runtime loads/decrypts assets/classes.dex.dat
+DexProtector runtime loading boundary
 ```
 
-`assets/classes.dex.dat` is 578,709 bytes and does not begin with `dex\n`, ZIP, or GZIP magic. Its first bytes are high-entropy (`07 79 f9 e0 c0 e2 40 bc ...`), consistent with encryption/packing rather than an ordinary DEX.
+### Protected asset state
 
-## 2. DexProtector loading process
+* `assets/classes.dex.dat` is the protected payload candidate.
+* It is not a plaintext DEX/ZIP/ELF/GZIP blob in the extracted APK form.
+* The resulting hidden runtime classes have not been recovered statically.
+* `libalice.so` imports Android asset APIs and filesystem/dynamic-loader APIs, so runtime recovery must watch both memory-backed and file-backed loading.
 
-The protector-visible Java/smali exposes these native methods:
+### Material that must not be mislabeled
 
-```java
-private static native byte[] gwj();
-public static native boolean oGzvwx(String str, int i, List list);
-public static native String s(String str);
-private static native void uapgpA();
-private static native void zInq(Object obj);
-public static native InputStream zqubf(Object obj, String str);
-```
+`ProtectedMyApplication.onCreate()` calls native `gwj()`, transforms the first 32 bytes through two substitution tables, and passes the result to native `zInq(Object)`. This is proven DexProtector state/material handoff. It is **not** proven to be a cloud-config key.
 
-Key bootstrap details:
+## Runtime objective
 
-* `attachBaseContext()` calls `ProtectedMyApplication$ProtectedMyApplication$a$a.a(this)`, then certificate check `J()`, then `System.loadLibrary("dpboot")`, then native `uapgpA()`.
-* Helper class `ProtectedMyApplication$ProtectedMyApplication$a$a` loads `libalice.so` and initializes `ProtectedMyApplication.MainActivity.d` with `Context` and `filesDir`.
-* `onCreate()` calls `gwj()`, uses `gwj()[0..31]` as indices into two hardcoded byte tables, produces a 32-byte array, and passes that array to native `zInq(bArr3)`.
-
-This is the only visible 32-byte derivation in the app-owned Java. It may be a DexProtector runtime/session key, asset-decryption key, or anti-tamper material. Static evidence does **not** prove it is the cloud-config content key.
-
-## 3. Raw received data and HTTP/auth
-
-No readable app class contains the cloud URL, endpoint path, headers, request parameters, or auth token. The only app-owned `HttpURLConnection` APIs are native stubs:
-
-```java
-ProtectedMyApplication.MainActivity.d.a(byte[] body, long value): HttpURLConnection
-ProtectedMyApplication.MainActivity.d.b(String value): HttpURLConnection
-```
-
-A wrapper method writes arbitrary bytes to the connection returned by `d.a(byte[], long)`, flushes them, and returns whether HTTP status is 200. This is protector/native infrastructure; there is no visible code tying it to cloud shared-config import.
-
-Therefore the raw cloud payload entry point cannot be identified by class/method name until the protected DEX is dumped. Dynamic capture should hook, in order:
-
-1. `java.net.URL.openConnection()` / `HttpURLConnection.getInputStream()` / `getOutputStream()`.
-2. OkHttp (`okhttp3.RealCall.execute/enqueue`, `ResponseBody.string/bytes`) if the protected DEX uses OkHttp.
-3. Firebase Database SDK methods if the protected DEX uses Firebase.
-4. `ProtectedMyApplication$MainActivity$d.a([B,J)` and `.b(String)` native-returned connections.
-
-## 4. Decode/decrypt/unpack pipeline findings
-
-### Search results in readable Java/smali
-
-The requested crypto and transform terms were searched across both source trees:
-
-* `Cipher`, `SecretKeySpec`, `IvParameterSpec`, `GCMParameterSpec`, `Mac`, `MessageDigest`, `AES`, `RSA`, `DES`
-* `Base64`, `hexDecode`, `hexEncode`, `GZIP`, `Inflater`
-* `validateV2rayConfig`, `validateSshConfig`, `decodeBase64`
-
-Findings:
-
-* App-owned visible code uses `MessageDigest.getInstance("SHA-256")` only for certificate pin/self-check in `ProtectedMyApplication.J()`.
-* App-owned visible code uses `Base64.decode(ProtectedMyApplication.s(str), 0)` in `ProtectedMyApplication.MainActivity.e.A(String)`, where `s(String)` is native. That is a protector string-decoding helper, not proven cloud config decoding.
-* `libnpvtunnel.Libnpvtunnel` declares native Base64/hex helpers and config validators, but there are **zero visible Java/smali call sites** to `decodeBase64`, `hexDecode`, `hexEncode`, `validateV2rayConfig`, or `validateSshConfig` in the readable dump.
-* `libalice.so` contains generic crypto-library strings (`AES`, `GCM`, `RSA`, `BASE64`, `SHA256`) and Android asset APIs (`AAssetManager_open`, `AAsset_getBuffer`). These prove native crypto capability and asset access, but not the cloud-config algorithm/key.
-* `libdexprotector.so` exposes only `JNI_OnLoad` in the dynamic symbol table and contains obfuscated/high-entropy strings including `AES`/`GCM` fragments; no recoverable Java JNI symbol names or hardcoded cloud key are exposed.
-
-### Current proven pipeline
+Recover this actual application flow:
 
 ```text
-assets/classes.dex.dat / protected methods
+Cloud response
  ↓
-libalice.so / libdpboot.so / libdexprotector.so native bootstrap
+raw bytes/string
  ↓
-runtime-unpacked app DEX loaded into ClassLoader
+decode/decrypt/decompress/verify
  ↓
-cloud import implementation (not in static readable tree)
+plaintext SSH config bytes or Xray/V2Ray JSON
  ↓
-unknown decode/decrypt/unpack operations
+libnpvtunnel.Libnpvtunnel.validateSshConfig(byte[])
+or
+libnpvtunnel.Libnpvtunnel.validateV2rayConfig(String)
+libnpvtunnel.Libnpvtunnel.testV2rayJsonConfig(byte[])
  ↓
-final plaintext bytes/string passed to libnpvtunnel or tunnel.start
+libnpvtunnel.SshTunnel.start(byte[], ...)
+or
+libnpvtunnel.XrayTunnel.start(byte[], ...)
 ```
 
-## 5. Secret/key material, IV/nonce/salt status
+The goal is not a generic DexProtector bypass. DexProtector dumping is only the required route to the cloud-unlock implementation.
 
-The only app-owned derived 32-byte material visible is in `ProtectedMyApplication.onCreate()`:
+## Added runtime recovery harness
+
+File: `tools/frida/npv_runtime_recovery.js`
+
+Usage example:
 
 ```text
-gwj() returns byte[]
-for i in 0..31:
-    derived[i] = table1[ table2[ gwj()[i] & 0xff ] & 0xff ]
-zInq(derived)
+frida -U -f com.napsternetlabs.napsternetv -l tools/frida/npv_runtime_recovery.js --no-pause
 ```
 
-This looks like a DexProtector native key handoff. Because no visible cloud importer consumes this value, I cannot label it as the cloud config key. No cloud IV, nonce, salt, AES mode, RSA key, HMAC key, or KDF is present in readable Java/smali.
-
-## 6. How cloud config becomes JSON/bytes and VPN config
-
-The final native API establishes the terminal data types:
-
-### SSH path
+Default dump directory on device:
 
 ```text
-plaintext/imported SSH config bytes
- ↓
-Libnpvtunnel.validateSshConfig(byte[]) -> SshConfig
- ↓
-SshTunnel.start(byte[] configBytes, SshTunnelInterface cb, ...)
+/data/data/com.napsternetlabs.napsternetv/files/npv_runtime_dumps
 ```
 
-`SshConfig` exposes fields for SSH address, username, password, HTTP proxy, proxy credentials, payload, SNI, TLS version, DNS tunnel resolver/mode, public key, nameserver, UDPGW port, tunnel type, proxy authentication, and transparent DNS.
+### 1. DexProtector initialization timing hooks
 
-### Xray/V2Ray path
+The harness hooks:
+
+* `com.napsternetlabs.napsternetv.ProtectedMyApplication.attachBaseContext(Context)`
+* `com.napsternetlabs.napsternetv.ProtectedMyApplication.onCreate()`
+
+Purpose:
 
 ```text
-plaintext/imported V2Ray/Xray JSON string/bytes
+Application launch
  ↓
-Libnpvtunnel.validateV2rayConfig(String)
-Libnpvtunnel.testV2rayJsonConfig(byte[])
+attachBaseContext() entry
  ↓
-XrayTunnel.start(byte[] jsonBytes, XrayTunnelInterface cb, ...)
+libalice/libdpboot/uapgpA() execution inside original method
+ ↓
+attachBaseContext() exit: first point where hidden classes may be loaded
+ ↓
+onCreate() entry/exit: zInq(Object) material handoff should complete
+ ↓
+enumerate class-loading and watch cloud/tunnel behavior
 ```
 
-`libgojni.so` contains Xray core strings and Go JNI symbols, confirming Xray parsing/runtime lives in the native Go library.
+Expected evidence:
 
-## 7. Import-method comparison
+* Timestamped logs showing when DexProtector initialization finishes.
+* A synchronization point for post-bootstrap class enumeration and DEX dumping.
 
-Readable resources prove distinct user-facing import actions:
+### 2. Class loading and DEX-loading hooks
 
-* Cloud import: `import_cloud_config`
-* QR import: `menu_item_import_config_qrcode`
-* Clipboard import: `menu_item_import_config_clipboard`, `clipboard_v2ray`
-* File import: `import_npvt_config_file`, manifest `ACTION_VIEW *.npvt`
-* Subscription import: `import_sub_config`
+The harness hooks:
 
-The shared final parser is very likely `libnpvtunnel` because only one exposed native validation/start surface exists for SSH and Xray. But the exact protected dispatch methods for cloud/QR/clipboard/file are not visible until unpacking.
+* `dalvik.system.DexClassLoader.<init>(String,String,String,ClassLoader)`
+* `dalvik.system.PathClassLoader.<init>(String,ClassLoader)`
+* `dalvik.system.PathClassLoader.<init>(String,String,ClassLoader)`
+* `dalvik.system.InMemoryDexClassLoader.<init>(ByteBuffer,ClassLoader)`
+* `dalvik.system.InMemoryDexClassLoader.<init>(ByteBuffer[],ClassLoader)`
+* `java.lang.ClassLoader.loadClass(String)` for `com.napsternetlabs.*` and `libnpvtunnel.*`
 
-## 8. Required dynamic extraction to answer the remaining “exact” questions
-
-To identify the exact cloud unlocking mechanism, capture these boundaries at runtime:
+Runtime evidence to collect:
 
 ```text
-Cloud shared config
- ↓  hook Activity/ViewModel callback after runtime DEX dump
-Raw received data
- ↓  hook URL/OkHttp/Firebase response bytes
-Decode/decrypt/unpack operations
- ↓  hook Base64, Cipher, Mac, MessageDigest, GZIPInputStream, Inflater, libnpvtunnel.decodeBase64/hexDecode
-Secret/key derivation
- ↓  hook SecretKeySpec, IvParameterSpec, GCMParameterSpec constructors and native zInq/gwj
-Plain configuration JSON/bytes
- ↓  hook JSONObject/Gson/Moshi and validateV2rayConfig/validateSshConfig/testV2rayJsonConfig
-Xray/SSH validation/start
- ↓  hook XrayTunnel.start and SshTunnel.start byte[] arguments
+DEX source path or ByteBuffer
+ ↓
+class loader constructor
+ ↓
+loaded class names becoming available
+ ↓
+recovered hidden application classes
 ```
 
-Recommended Frida hooks:
+If DexProtector uses `InMemoryDexClassLoader`, the harness duplicates the incoming `ByteBuffer`, logs the first bytes, and writes buffers with DEX/ZIP magic to the dump directory. If DexProtector uses file-backed extraction, the class-loader path logs identify the extracted file path.
 
-* `dalvik.system.BaseDexClassLoader.<init>` and `DexClassLoader.<init>` to log the unpacked DEX path.
-* `java.io.FileOutputStream.write(byte[])` when the destination ends with `.dex`/`.jar`/`.apk` to dump unpacked code.
-* `javax.crypto.Cipher.getInstance/init/doFinal`, `SecretKeySpec.<init>`, `IvParameterSpec.<init>`, `GCMParameterSpec.<init>`.
-* `android.util.Base64.decode`, `libnpvtunnel.Libnpvtunnel.decodeBase64`, `hexDecode`, `validateSshConfig`, `validateV2rayConfig`, `testV2rayJsonConfig`.
-* `libnpvtunnel.SshTunnel.start` and `libnpvtunnel.XrayTunnel.start` to dump final plaintext bytes.
+### 3. File-backed extraction hooks
 
-## Final answer to the requested fields
+The harness hooks:
 
-* **Where decryption happens:** not in readable Java/smali. Protected runtime code loaded via `ProtectedMyApplication.attachBaseContext()` / `libalice.so` / `libdpboot.so` / `uapgpA()` must be unpacked. Native asset access and crypto strings in `libalice.so` indicate decryption capability there, but cloud-specific decryption is not statically proven.
-* **What algorithm is used:** not recoverable from the readable dump. AES/GCM/RSA strings exist in native libraries, but no call chain links them to cloud payloads.
-* **Where the key comes from:** the only visible 32-byte derived material is produced in `ProtectedMyApplication.onCreate()` from `gwj()` plus two substitution tables and passed to native `zInq()`. This is likely protector key material, not proven cloud material.
-* **How cloud config becomes JSON:** not visible before runtime unpacking. The final accepted form is either SSH config bytes consumed by `validateSshConfig`/`SshTunnel.start`, or V2Ray/Xray JSON consumed by `validateV2rayConfig`/`XrayTunnel.start`.
-* **Exact classes/functions involved:** visible bootstrap classes are `ProtectedMyApplication`, `ProtectedMyApplication$ProtectedMyApplication$a$a`, `ProtectedMyApplication$MainActivity$d`, and `ProtectedMyApplication$MainActivity$e`; final VPN classes are `libnpvtunnel.Libnpvtunnel`, `SshTunnel`, `XrayTunnel`, `SshConfig`, `SshTunnelInterface`, and `XrayTunnelInterface`. The exact cloud importer class/function is in the protected runtime DEX and is not present in the static readable dump.
-=======
-# NPV Tunnel cloud-configuration reverse-engineering report
+* `java.io.FileOutputStream.<init>(String)`
+* `java.io.FileOutputStream.<init>(File)`
+* `java.io.FileOutputStream.<init>(String,boolean)`
+* `java.io.FileOutputStream.<init>(File,boolean)`
+* `java.io.FileOutputStream.write(byte[])`
+* `java.io.FileOutputStream.write(byte[],int,int)`
+* `java.io.File.renameTo(File)`
 
-## Scope and evidence base
-
-This analysis used both decompiled JADX output under `npv_java_source/` and apktool smali/resources under `npv_smali_source/`.  The APK is protected: the manifest uses `com.napsternetlabs.napsternetv.ProtectedAppComponentFactory` and `.ProtectedMyApplication`, and the real app classes are hidden behind DexProtector/libdexprotector plus an encrypted `assets/classes.dex.dat`.  Consequently, the complete Compose UI/ViewModel Kotlin call graph is not present as readable Java/smali in the provided dump.
-
-## Entry points that are provable from the static dump
-
-### Android entry points
-
-* Main launcher/import Activity: `com.napsternetlabs.napsternetv.kkAhtatwbwcyv`.
-* VPN Service: `com.napsternetlabs.napsternetv.bAEBnrhbzougz`, exported with `android.permission.BIND_VPN_SERVICE`.
-* Native Go/Xray bridge: package `libnpvtunnel`, loaded by `go.Seq.touch()` from `Libnpvtunnel`.
-
-The manifest also proves that file import enters the same main Activity through `ACTION_VIEW` handlers for `content://` and `file://` data, specifically including `*.npvt` path patterns.
-
-### Cloud-import UI string evidence
-
-The application contains Compose resource strings for:
-
-* `import_cloud_config`
-* `export_to_cloud`
-* `cloud_config_expiry_minutes`
-* `cloud_config_disable_integrity_check`
-* `invalid_cloud_config_expiry`
-* `configuration_is_expired`
-* `config_expiry_check_failed`
-* `menu_item_import_config_clipboard`
-* `menu_item_import_config_qrcode`
-* `import_npvt_config_file`
-* `import_sub_config`
-
-These are evidence that cloud, QR, clipboard, file, and subscription import features exist. They do **not**, by themselves, prove the exact runtime UI callback because the protected application logic that references these resources is not readable in the provided Java/smali.
-
-## Cloud download architecture
-
-No readable Java or smali class in the dump contains a recoverable cloud-import HTTP endpoint, URL-construction routine, request headers, auth token generation, Retrofit interface, or app-level OkHttp request for NPV cloud configs.  Searches for `HttpURLConnection`, `OkHttp`, `Retrofit`, `cloud`, endpoint-looking `https://` strings, `FirebaseDatabase`, and Firebase Remote Config show SDK/framework code and resources, not a concrete NPV cloud-config import call chain.
-
-Important distinction: Firebase Database/Remote Config components are registered in the manifest, but no readable NPV app call site to them is exposed in the Java/smali. Therefore the cloud backend cannot be asserted as Firebase from the provided static dump alone.
-
-## Data transformation / encryption findings
-
-### Java-visible transformation helpers
-
-`libnpvtunnel.Libnpvtunnel` exports native helpers:
-
-* `decodeBase64(String): String`
-* `encodeBase64(String): String`
-* `hexDecode(byte[]): byte[]`
-* `hexEncode(byte[]): String`
-* `stripIPAddresses(...)`
-* `validateSshConfig(byte[]): SshConfig`
-* `validateV2rayConfig(String)`
-* `testV2rayJsonConfig(byte[])`
-
-This proves at least Base64 and hex encoding helpers are available to the app, and that SSH/V2Ray validation is delegated to native Go code. It does **not** prove that cloud responses are AES/RSA encrypted; no readable cloud import path reaches these helpers in the exposed code.
-
-### Native cryptography/key status
-
-`libgojni.so` contains Xray/Go bridge symbols and exposes validation/start routines. `libalice.so` contains crypto-library strings mentioning AES/RSA/GCM/PKCS errors, but those are generic library strings and are not evidence of NPV cloud-config encryption. No hardcoded cloud decryption key, AES mode, IV format, RSA public/private key, HMAC key, signature verifier, or key-derivation routine was recoverable from readable Java/smali.
-
-The likely reason is protection: `assets/classes.dex.dat` is present and `libdexprotector.so` is shipped. The actual cloud import and any decryptor may be in encrypted code loaded at runtime by DexProtector.
-
-## Expiry / lifetime system
-
-Two separate expiry mechanisms are visible:
-
-1. UI/config strings for cloud-config expiry settings and errors: `cloud_config_expiry_minutes`, `invalid_cloud_config_expiry`, `configuration_is_expired`, and `config_expiry_check_failed`.
-2. Native tunnel callback interfaces for runtime expiry enforcement:
-   * `SshTunnelInterface.onConfigTimeLeft(String)`
-   * `SshTunnelInterface.onConfigurationExpired()`
-   * `SshTunnelInterface.onConfigurationExpiryCheckFailed(String)`
-   * `XrayTunnelInterface.onConfigTimeLeft(String)`
-   * `XrayTunnelInterface.onConfigurationExpired()`
-   * `XrayTunnelInterface.onConfigurationExpiryCheckFailed(String)`
-
-This indicates expiry is not just an import-screen property: the running SSH/Xray tunnel reports remaining time and expiry failures back to Java. The static dump does not expose where the imported cloud expiry timestamp/TTL is persisted, nor whether the periodic check is local-only or remote-assisted. The `onConfigurationExpiryCheckFailed` callback name strongly suggests at least one validation/check operation can fail independently from a simple local timestamp comparison, but the callback implementation and scheduler are protected.
-
-## VPN configuration path proven from native bridge
-
-The visible native API supports two final runtime outputs:
-
-### SSH path
-
-Cloud/QR/clipboard/file payload, after parsing, can become a native `SshConfig` object.  `SshConfig` fields include SSH address, username, password, HTTP proxy, proxy credentials, payload, SNI, TLS version, DNS tunnel mode/resolver, public key, nameserver, UDPGW port, tunnel type, proxy-auth flag, and UDPGW transparent DNS flag. `Libnpvtunnel.validateSshConfig(byte[])` returns this object, and `SshTunnel.start(SshConfig, SshTunnelInterface, ...)` starts the native tunnel.
-
-### Xray/V2Ray path
-
-Cloud/QR/clipboard/file payload, after parsing, can become raw V2Ray/Xray JSON. `Libnpvtunnel.validateV2rayConfig(String)` and `Libnpvtunnel.testV2rayJsonConfig(byte[])` validate it, and `XrayTunnel.start(byte[], XrayTunnelInterface, String, String, boolean...)` starts it.
-
-The Xray core itself is inside `libgojni.so`, which contains many Xray protobuf/package strings (`github.com/xtls/xray-core/...`).
-
-## Comparison of import methods
-
-Static evidence proves the app has separate user-facing import commands for cloud import, QR-code import, clipboard import, file import, and subscription import. The final parser/validator layer is very likely shared because there are only common native validators for SSH config bytes and V2Ray JSON/string data. However, the exact Java/Kotlin dispatch code that routes cloud-vs-QR-vs-clipboard-vs-file into these validators is inside protected code and is not readable in the provided JADX/smali.
-
-## Runtime flow diagram with confidence levels
+Runtime evidence to collect:
 
 ```text
-User selects “Import cloud config”                         [resource-proven]
+Native/Java extraction writes
  ↓
-Protected Compose Activity/ViewModel code                  [not exposed]
+app-private file path
  ↓
-Cloud request / backend token / response download           [not exposed]
+first bytes and length of each write
  ↓
-Decode/decrypt/parse response                               [not exposed]
+renamed final artifact
  ↓
-Either SSH config bytes or V2Ray/Xray JSON                  [native API-proven]
- ↓
-Libnpvtunnel.validateSshConfig(byte[]) or validateV2rayConfig(String)
- ↓
-SshConfig native object OR accepted Xray JSON               [native API-proven]
- ↓
-SshTunnel.start(...) or XrayTunnel.start(...)               [native API-proven]
- ↓
-VpnService `bAEBnrhbzougz` and Go/Xray native core          [manifest/native-proven]
- ↓
-Expiry callbacks: onConfigTimeLeft / onConfigurationExpired / onConfigurationExpiryCheckFailed
+DEX/ZIP artifact copied to npv_runtime_dumps if magic is visible
 ```
 
-## Direct answer about the cloud decryption key/auth
+This is necessary because `libalice.so` imports file APIs and receives `filesDir` during bootstrap.
 
-I did **not** recover a cloud decryption key, cloud auth token, request signing secret, or exact decryption algorithm from the provided readable source. The exposed Java/smali contains no cloud endpoint or key material. The app is protected by DexProtector and ships `assets/classes.dex.dat`; this is the most likely location of the missing cloud-import code and any associated decryptor/auth logic after runtime unpacking.
+### 4. HTTP/cloud response hooks
 
-## Remaining unknowns / next work
+The harness hooks:
 
-1. Run the APK under instrumentation and dump the dynamically loaded/unpacked DEX after `ProtectedMyApplication` initializes.
-2. Hook OkHttp/HttpURLConnection/Firebase Database calls dynamically to capture cloud URLs, headers, parameters, and tokens.
-3. Hook `javax.crypto.Cipher`, `Mac`, `MessageDigest`, `Base64`, and `libnpvtunnel.*` JNI boundaries to capture plaintext before/after transformations.
-4. Hook `SshTunnel.start`, `XrayTunnel.start`, `validateSshConfig`, and `validateV2rayConfig` arguments to recover final readable configs.
-5. Hook expiry callbacks and time APIs to determine whether the 1-15 minute lifetime is server-issued TTL, signed timestamp, remote polling, or local wall-clock enforcement.
+* `java.net.URL.openConnection()`
+* `java.net.HttpURLConnection.getOutputStream()`
+* `java.net.HttpURLConnection.getInputStream()`
 
+Runtime evidence to collect:
+
+```text
+URL.openConnection()
+ ↓
+request method/output stream
+ ↓
+response code/input stream
+ ↓
+raw response bytes captured by stream/body hooks added in a follow-up if needed
+```
+
+This layer establishes the cloud endpoint and request/response timing. If the recovered DEX uses OkHttp/Firebase instead, those hooks should be added after class enumeration shows the concrete client classes.
+
+### 5. Crypto and transform hooks
+
+The harness hooks:
+
+* `javax.crypto.Cipher.getInstance(String)`
+* `javax.crypto.Cipher.doFinal(byte[])`
+* `javax.crypto.spec.SecretKeySpec(byte[],String)`
+* `javax.crypto.spec.IvParameterSpec(byte[])`
+* `javax.crypto.spec.GCMParameterSpec(int,byte[])`
+* `android.util.Base64.decode(String,int)`
+
+Runtime evidence to collect:
+
+```text
+raw response or encoded payload
+ ↓
+Base64/crypto input
+ ↓
+key/IV constructor arguments with algorithm names
+ ↓
+Cipher.doFinal output
+ ↓
+plaintext JSON/config candidate or next transform input
+```
+
+Important limitation: these hooks capture Java crypto only. If cloud unlock happens in native code, the Java crypto hooks will stay silent or only show unrelated DexProtector activity. In that case, trace JNI/native buffers around app-owned native calls and final `libnpvtunnel` sinks.
+
+### 6. Final plaintext sink hooks
+
+The harness hooks:
+
+* `libnpvtunnel.Libnpvtunnel.validateSshConfig(byte[])`
+* `libnpvtunnel.Libnpvtunnel.validateV2rayConfig(String)`
+* `libnpvtunnel.Libnpvtunnel.testV2rayJsonConfig(byte[])`
+* `libnpvtunnel.SshTunnel.start(byte[], ...)`
+* `libnpvtunnel.XrayTunnel.start(byte[], ...)`
+
+Runtime evidence to collect:
+
+```text
+post-unlock config bytes/string
+ ↓
+validator/start method arguments
+ ↓
+plaintext config dumps in npv_runtime_dumps
+ ↓
+SSH/Xray tunnel startup
+```
+
+These hooks are the highest-confidence plaintext capture points because the native tunnel must receive usable config data regardless of where cloud unlock happens upstream.
+
+## Recovered DEX analysis workflow
+
+After obtaining one or more dumped DEX/ZIP artifacts:
+
+1. Pull dumps from the device:
+
+   ```text
+   adb shell run-as com.napsternetlabs.napsternetv ls -l files/npv_runtime_dumps
+   adb exec-out run-as com.napsternetlabs.napsternetv tar -C files -cf - npv_runtime_dumps > npv_runtime_dumps.tar
+   ```
+
+2. Identify artifacts:
+
+   ```text
+   python3 - <<'PY'
+   from pathlib import Path
+   for p in Path('npv_runtime_dumps').glob('*'):
+       b = p.read_bytes()[:16]
+       print(p, len(p.read_bytes()), b.hex(), b[:4])
+   PY
+   ```
+
+3. Decompile recovered DEX separately with JADX/apktool tooling and keep output outside the original visible tree, for example:
+
+   ```text
+   jadx -d recovered_runtime_jadx recovered.dex
+   ```
+
+4. Search only the recovered runtime for cloud logic:
+
+   ```text
+   rg -n "cloud|import|subscription|remote|config|url|http|api|firebase|retrofit|okhttp" recovered_runtime_jadx
+   rg -n "Cipher|AES|RSA|GCM|SecretKeySpec|IvParameterSpec|GCMParameterSpec|MessageDigest|Mac|Base64|hex|gzip|Inflater" recovered_runtime_jadx
+   rg -n "JSONObject|Gson|Moshi|Json|validateV2rayConfig|validateSshConfig|SshTunnel|XrayTunnel" recovered_runtime_jadx
+   ```
+
+5. Build a recovered-code data-flow table for each candidate cloud handler:
+
+   ```text
+   Class/method
+   Input: URL/share token/raw response
+   Processing: decode/decrypt/decompress/verify/parse
+   Output: JSON string, config byte[], model object, or tunnel validator call
+   Next edge: caller/callee or JNI/native boundary
+   ```
+
+## If the cloud unlocker is native
+
+If recovered Java/Kotlin only passes opaque buffers into JNI and receives plaintext/config bytes back, the investigation should pivot to native boundary capture rather than guessing from strings.
+
+Required runtime captures:
+
+```text
+Java/Kotlin caller argument
+ ↓
+JNI native method entry
+ ↓
+input pointer/length or jbyteArray contents
+ ↓
+native transform
+ ↓
+returned jbyteArray/String/Object or output pointer/length
+ ↓
+validator/start sink argument
+```
+
+Native hook priorities:
+
+1. App-owned JNI methods discovered in recovered DEX.
+2. `RegisterNatives` mappings during `JNI_OnLoad` for `libalice.so`, `libdpboot.so`, `libdexprotector.so`, and any newly loaded native library.
+3. `JNIEnv->NewByteArray`, `SetByteArrayRegion`, `GetByteArrayElements`, `ReleaseByteArrayElements`, `NewStringUTF`, and `GetStringUTFChars` around the candidate native method.
+4. `libnpvtunnel` validators/start methods as the downstream plaintext confirmation point.
+
+## Proven vs unknown after this update
+
+### Proven
+
+* Static cloud unlock code is not present in the visible JADX/smali tree.
+* The DexProtector bootstrap boundary is `attachBaseContext()` → `libalice.so` → certificate check → `libdpboot.so` → `uapgpA()`.
+* `classes.dex.dat` is not plaintext DEX/ZIP/ELF/GZIP in the extracted asset form.
+* Runtime hooks must observe memory-backed and file-backed DEX loading.
+* Final plaintext config must reach `libnpvtunnel` validator/start APIs.
+* A runtime Frida harness now exists to collect DEX-loading, class-loading, network, crypto, and final sink evidence.
+
+### Unknown
+
+* Where the decrypted DEX bytes exist in memory.
+* Whether hidden DEX is loaded through a public class-loader constructor, ART internals, or a file-backed extraction path.
+* The recovered hidden class names and cloud import method names.
+* Cloud endpoint/auth/request format.
+* Decode/decrypt/decompress/signature verification logic.
+* Cloud config algorithm, key source, IV/nonce/salt, and whether the cloud payload is encrypted at all.
+* Whether the unlocker is Java/Kotlin or native.
+
+## Runtime flow diagram
+
+```text
+Launch app under Frida
+ ↓
+attachBaseContext() entry
+ ↓
+libalice + libdpboot + uapgpA() bootstrap
+ ↓
+watch class-loader constructors, file writes, InMemoryDexClassLoader buffers
+ ↓
+dump recovered runtime DEX/ZIP
+ ↓
+decompile recovered runtime separately
+ ↓
+locate cloud import/download handler
+ ↓
+hook HTTP/raw response and crypto/native boundaries
+ ↓
+capture raw cloud response
+ ↓
+capture decode/decrypt/decompress output
+ ↓
+capture plaintext validator/start arguments
+ ↓
+identify exact cloud unlock function, algorithm, key source, IV/nonce/salt with evidence
+```
+
+## Immediate next steps
+
+1. Run `tools/frida/npv_runtime_recovery.js` against the APK on a test device/emulator.
+2. Confirm whether the hidden runtime appears through `InMemoryDexClassLoader`, `DexClassLoader`, file writes, or only lower-level ART/native APIs.
+3. Pull and decompile dumped DEX artifacts.
+4. Search the recovered DEX for cloud/import/network/crypto/parser/tunnel sink terms.
+5. Add focused hooks for the recovered cloud classes and any native methods they call.
+6. Produce the final cloud-unlock report only after the raw response → decoded/decrypted payload → plaintext config → `libnpvtunnel` sink flow is captured.
