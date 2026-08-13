@@ -1,0 +1,72 @@
+package com.google.android.gms.internal.measurement;
+
+/* JADX INFO: loaded from: classes3.dex */
+public final class A2 extends com.google.android.gms.internal.measurement.AbstractC6130t4 implements com.google.android.gms.internal.measurement.InterfaceC5983c5 {
+    private static final com.google.android.gms.internal.measurement.A2 zzc;
+    private static volatile com.google.android.gms.internal.measurement.InterfaceC6028h5 zzd;
+    private com.google.android.gms.internal.measurement.D4 zze = com.google.android.gms.internal.measurement.AbstractC6130t4.B();
+
+    public static final class a extends com.google.android.gms.internal.measurement.AbstractC6130t4.b implements com.google.android.gms.internal.measurement.InterfaceC5983c5 {
+        private a() {
+            super(com.google.android.gms.internal.measurement.A2.zzc);
+        }
+    }
+
+    static {
+        com.google.android.gms.internal.measurement.A2 a6 = new com.google.android.gms.internal.measurement.A2();
+        zzc = a6;
+        com.google.android.gms.internal.measurement.AbstractC6130t4.t(com.google.android.gms.internal.measurement.A2.class, a6);
+    }
+
+    private A2() {
+    }
+
+    public static com.google.android.gms.internal.measurement.A2 G() {
+        return zzc;
+    }
+
+    public final java.util.List H() {
+        return this.zze;
+    }
+
+    public final int k() {
+        return this.zze.size();
+    }
+
+    @Override // com.google.android.gms.internal.measurement.AbstractC6130t4
+    protected final java.lang.Object q(int i6, java.lang.Object obj, java.lang.Object obj2) {
+        switch (com.google.android.gms.internal.measurement.F2.f40505a[i6 - 1]) {
+            case 1:
+                return new com.google.android.gms.internal.measurement.A2();
+            case 2:
+                return new com.google.android.gms.internal.measurement.A2.a();
+            case 3:
+                return com.google.android.gms.internal.measurement.AbstractC6130t4.r(zzc, "\u0004\u0001\u0000\u0000\u0001\u0001\u0001\u0000\u0001\u0000\u0001\u001b", new java.lang.Object[]{"zze", com.google.android.gms.internal.measurement.B2.class});
+            case 4:
+                return zzc;
+            case 5:
+                com.google.android.gms.internal.measurement.InterfaceC6028h5 aVar = zzd;
+                if (aVar == null) {
+                    synchronized (com.google.android.gms.internal.measurement.A2.class) {
+                        try {
+                            aVar = zzd;
+                            if (aVar == null) {
+                                aVar = new com.google.android.gms.internal.measurement.AbstractC6130t4.a(zzc);
+                                zzd = aVar;
+                            }
+                        } catch (java.lang.Throwable th) {
+                            throw th;
+                        }
+                        break;
+                    }
+                }
+                return aVar;
+            case 6:
+                return (byte) 1;
+            case 7:
+                return null;
+            default:
+                throw new java.lang.UnsupportedOperationException();
+        }
+    }
+}

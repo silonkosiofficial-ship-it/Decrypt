@@ -1,0 +1,18 @@
+package com.google.android.gms.internal.ads;
+
+/* JADX INFO: renamed from: com.google.android.gms.internal.ads.Dw, reason: case insensitive filesystem */
+/* JADX INFO: loaded from: classes3.dex */
+public final class C2295Dw implements com.google.android.gms.internal.ads.InterfaceC3213az0 {
+
+    /* JADX INFO: renamed from: a, reason: collision with root package name */
+    private final com.google.android.gms.internal.ads.InterfaceC5078rz0 f26812a;
+
+    public C2295Dw(com.google.android.gms.internal.ads.InterfaceC5078rz0 interfaceC5078rz0) {
+        this.f26812a = interfaceC5078rz0;
+    }
+
+    @Override // com.google.android.gms.internal.ads.InterfaceC5078rz0
+    public final /* bridge */ /* synthetic */ java.lang.Object b() {
+        return new p224w3.v((java.lang.String) this.f26812a.b());
+    }
+}

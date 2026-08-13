@@ -1,0 +1,67 @@
+package com.google.android.gms.internal.ads;
+
+/* JADX INFO: renamed from: com.google.android.gms.internal.ads.t8, reason: case insensitive filesystem */
+/* JADX INFO: loaded from: classes3.dex */
+public final class C5206t8 extends com.google.android.gms.internal.ads.Jv0 implements com.google.android.gms.internal.ads.InterfaceC4633nw0 {
+    public static final /* synthetic */ int zza = 0;
+    private static final com.google.android.gms.internal.ads.C5206t8 zzb;
+    private static volatile com.google.android.gms.internal.ads.InterfaceC5292tw0 zzc;
+    private int zzd;
+    private boolean zzf;
+    private boolean zzg;
+    private long zze = 100;
+    private long zzh = 300;
+    private long zzi = 1000;
+
+    static {
+        com.google.android.gms.internal.ads.C5206t8 c5206t8 = new com.google.android.gms.internal.ads.C5206t8();
+        zzb = c5206t8;
+        com.google.android.gms.internal.ads.Jv0.F(com.google.android.gms.internal.ads.C5206t8.class, c5206t8);
+    }
+
+    private C5206t8() {
+    }
+
+    public static com.google.android.gms.internal.ads.C5206t8 c0() {
+        return zzb;
+    }
+
+    @Override // com.google.android.gms.internal.ads.Jv0
+    protected final java.lang.Object W(com.google.android.gms.internal.ads.Iv0 iv0, java.lang.Object obj, java.lang.Object obj2) {
+        int iOrdinal = iv0.ordinal();
+        if (iOrdinal == 0) {
+            return (byte) 1;
+        }
+        if (iOrdinal == 2) {
+            return com.google.android.gms.internal.ads.Jv0.A(zzb, "\u0004\u0005\u0000\u0001\u0001\u0005\u0005\u0000\u0000\u0000\u0001ဂ\u0000\u0002ဇ\u0001\u0003ဇ\u0002\u0004ဂ\u0003\u0005ဂ\u0004", new java.lang.Object[]{"zzd", "zze", "zzf", "zzg", "zzh", "zzi"});
+        }
+        if (iOrdinal == 3) {
+            return new com.google.android.gms.internal.ads.C5206t8();
+        }
+        com.google.android.gms.internal.ads.AbstractC5096s8 abstractC5096s8 = null;
+        if (iOrdinal == 4) {
+            return new com.google.android.gms.internal.ads.C4877q8(abstractC5096s8);
+        }
+        if (iOrdinal == 5) {
+            return zzb;
+        }
+        if (iOrdinal != 6) {
+            throw null;
+        }
+        com.google.android.gms.internal.ads.InterfaceC5292tw0 gv0 = zzc;
+        if (gv0 == null) {
+            synchronized (com.google.android.gms.internal.ads.C5206t8.class) {
+                try {
+                    gv0 = zzc;
+                    if (gv0 == null) {
+                        gv0 = new com.google.android.gms.internal.ads.Gv0(zzb);
+                        zzc = gv0;
+                    }
+                } catch (java.lang.Throwable th) {
+                    throw th;
+                }
+            }
+        }
+        return gv0;
+    }
+}

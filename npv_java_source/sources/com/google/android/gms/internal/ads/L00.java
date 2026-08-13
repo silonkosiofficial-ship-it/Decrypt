@@ -1,0 +1,21 @@
+package com.google.android.gms.internal.ads;
+
+/* JADX INFO: loaded from: classes3.dex */
+public final class L00 implements com.google.android.gms.internal.ads.InterfaceC3213az0 {
+
+    /* JADX INFO: renamed from: a, reason: collision with root package name */
+    private final com.google.android.gms.internal.ads.InterfaceC5078rz0 f29181a;
+
+    /* JADX INFO: renamed from: b, reason: collision with root package name */
+    private final com.google.android.gms.internal.ads.InterfaceC5078rz0 f29182b;
+
+    public L00(com.google.android.gms.internal.ads.InterfaceC5078rz0 interfaceC5078rz0, com.google.android.gms.internal.ads.InterfaceC5078rz0 interfaceC5078rz1) {
+        this.f29181a = interfaceC5078rz0;
+        this.f29182b = interfaceC5078rz1;
+    }
+
+    @Override // com.google.android.gms.internal.ads.InterfaceC5078rz0
+    public final /* bridge */ /* synthetic */ java.lang.Object b() {
+        return new com.google.android.gms.internal.ads.T10(((com.google.android.gms.internal.ads.C4864q10) this.f29181a).b(), ((java.lang.Integer) p184s3.A.c().a(com.google.android.gms.internal.ads.AbstractC2161Af.rc)).intValue(), (java.util.concurrent.ScheduledExecutorService) this.f29182b.b());
+    }
+}

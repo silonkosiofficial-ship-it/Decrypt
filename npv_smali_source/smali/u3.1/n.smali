@@ -1,0 +1,40 @@
+.class public final synthetic Lu3/n;
+.super Ljava/lang/Object;
+.source "SourceFile"
+
+# interfaces
+.implements Lcom/google/android/gms/internal/ads/Iu;
+
+
+# instance fields
+.field public final synthetic C:Lu3/x;
+
+
+# direct methods
+.method public synthetic constructor <init>(Lu3/x;)V
+    .locals 0
+
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+
+    iput-object p1, p0, Lu3/n;->C:Lu3/x;
+
+    return-void
+.end method
+
+
+# virtual methods
+.method public final a(ZILjava/lang/String;Ljava/lang/String;)V
+    .locals 0
+
+    .prologue
+    iget-object p1, p0, Lu3/n;->C:Lu3/x;
+
+    iget-object p1, p1, Lu3/x;->E:Lcom/google/android/gms/internal/ads/Ot;
+
+    if-eqz p1, :cond_0
+
+    invoke-interface {p1}, Lcom/google/android/gms/internal/ads/Ot;->f0()V
+
+    :cond_0
+    return-void
+.end method

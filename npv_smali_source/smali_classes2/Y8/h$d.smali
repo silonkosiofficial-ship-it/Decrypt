@@ -1,0 +1,72 @@
+.class final LY8/h$d;
+.super Lo7/d;
+.source "SourceFile"
+
+
+# annotations
+.annotation system Ldalvik/annotation/EnclosingMethod;
+    value = LY8/h;->S0(LY8/h;Lm7/e;)Ljava/lang/Object;
+.end annotation
+
+.annotation system Ldalvik/annotation/InnerClass;
+    accessFlags = 0x18
+    name = null
+.end annotation
+
+
+# instance fields
+.field synthetic F:Ljava/lang/Object;
+
+.field final synthetic G:LY8/h;
+
+.field H:I
+
+
+# direct methods
+.method constructor <init>(LY8/h;Lm7/e;)V
+    .locals 0
+
+    iput-object p1, p0, LY8/h$d;->G:LY8/h;
+
+    invoke-direct {p0, p2}, Lo7/d;-><init>(Lm7/e;)V
+
+    return-void
+.end method
+
+
+# virtual methods
+.method public final B(Ljava/lang/Object;)Ljava/lang/Object;
+    .locals 1
+
+    .prologue
+    iput-object p1, p0, LY8/h$d;->F:Ljava/lang/Object;
+
+    iget p1, p0, LY8/h$d;->H:I
+
+    const/high16 v0, -0x80000000
+
+    or-int/2addr p1, v0
+
+    iput p1, p0, LY8/h$d;->H:I
+
+    iget-object p1, p0, LY8/h$d;->G:LY8/h;
+
+    invoke-static {p1, p0}, LY8/h;->S0(LY8/h;Lm7/e;)Ljava/lang/Object;
+
+    move-result-object p1
+
+    invoke-static {}, Ln7/b;->g()Ljava/lang/Object;
+
+    move-result-object v0
+
+    if-ne p1, v0, :cond_0
+
+    return-object p1
+
+    :cond_0
+    invoke-static {p1}, LY8/n;->b(Ljava/lang/Object;)LY8/n;
+
+    move-result-object p1
+
+    return-object p1
+.end method

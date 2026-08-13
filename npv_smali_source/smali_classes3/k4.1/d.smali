@@ -1,0 +1,13 @@
+.class public abstract Lk4/d;
+.super Lk4/e;
+.source "SourceFile"
+
+
+# direct methods
+.method public constructor <init>()V
+    .locals 0
+
+    invoke-direct {p0}, Lk4/e;-><init>()V
+
+    return-void
+.end method

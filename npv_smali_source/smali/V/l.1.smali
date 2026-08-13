@@ -1,0 +1,14 @@
+.class public interface abstract LV/l;
+.super Ljava/lang/Object;
+.source "SourceFile"
+
+
+# virtual methods
+.method public abstract f()V
+.end method
+
+.method public abstract i()V
+.end method
+
+.method public abstract p()V
+.end method

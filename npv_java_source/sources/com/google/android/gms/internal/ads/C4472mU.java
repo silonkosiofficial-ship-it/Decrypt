@@ -1,0 +1,22 @@
+package com.google.android.gms.internal.ads;
+
+/* JADX INFO: renamed from: com.google.android.gms.internal.ads.mU, reason: case insensitive filesystem */
+/* JADX INFO: loaded from: classes3.dex */
+public final class C4472mU implements com.google.android.gms.internal.ads.InterfaceC3213az0 {
+
+    /* JADX INFO: renamed from: a, reason: collision with root package name */
+    private final com.google.android.gms.internal.ads.InterfaceC5078rz0 f37357a;
+
+    /* JADX INFO: renamed from: b, reason: collision with root package name */
+    private final com.google.android.gms.internal.ads.InterfaceC5078rz0 f37358b;
+
+    public C4472mU(com.google.android.gms.internal.ads.InterfaceC5078rz0 interfaceC5078rz0, com.google.android.gms.internal.ads.InterfaceC5078rz0 interfaceC5078rz1, com.google.android.gms.internal.ads.InterfaceC5078rz0 interfaceC5078rz2) {
+        this.f37357a = interfaceC5078rz0;
+        this.f37358b = interfaceC5078rz1;
+    }
+
+    @Override // com.google.android.gms.internal.ads.InterfaceC5078rz0
+    public final /* bridge */ /* synthetic */ java.lang.Object b() {
+        return new com.google.android.gms.internal.ads.C4362lU((android.content.Context) this.f37357a.b(), (com.google.android.gms.internal.ads.AbstractC2334Ey) this.f37358b.b(), com.google.android.gms.internal.ads.O80.c());
+    }
+}

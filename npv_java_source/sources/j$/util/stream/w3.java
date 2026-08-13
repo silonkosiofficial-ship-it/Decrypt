@@ -1,0 +1,24 @@
+package j$.util.stream;
+
+/* JADX INFO: loaded from: classes4.dex */
+final class w3 extends j$.util.stream.y3 implements j$.util.X {
+    @Override // j$.util.stream.A3
+    protected final j$.util.Spliterator a(j$.util.Spliterator spliterator, long j6, long j10, long j11, long j12) {
+        return new j$.util.stream.w3((j$.util.X) spliterator, j6, j10, j11, j12);
+    }
+
+    @Override // j$.util.stream.y3
+    protected final java.lang.Object b() {
+        return new j$.util.stream.F0(1);
+    }
+
+    @Override // j$.util.Spliterator
+    public final /* synthetic */ void forEachRemaining(java.util.function.Consumer consumer) {
+        j$.util.Q.b(this, consumer);
+    }
+
+    @Override // j$.util.Spliterator
+    public final /* synthetic */ boolean tryAdvance(java.util.function.Consumer consumer) {
+        return j$.util.Q.g(this, consumer);
+    }
+}

@@ -1,0 +1,3 @@
+.class public abstract Ll7/a;
+.super Ll7/e;
+.source "SourceFile"

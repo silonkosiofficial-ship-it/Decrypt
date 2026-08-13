@@ -1,0 +1,29 @@
+package com.google.android.gms.internal.ads;
+
+/* JADX INFO: renamed from: com.google.android.gms.internal.ads.tm, reason: case insensitive filesystem */
+/* JADX INFO: loaded from: classes3.dex */
+final class C5271tm implements p244y3.d {
+
+    /* JADX INFO: renamed from: a, reason: collision with root package name */
+    final /* synthetic */ com.google.android.gms.internal.ads.InterfaceC3296bm f39022a;
+
+    /* JADX INFO: renamed from: b, reason: collision with root package name */
+    final /* synthetic */ com.google.android.gms.internal.ads.BinderC5601wm f39023b;
+
+    C5271tm(com.google.android.gms.internal.ads.BinderC5601wm binderC5601wm, com.google.android.gms.internal.ads.InterfaceC3296bm interfaceC3296bm) {
+        this.f39022a = interfaceC3296bm;
+        this.f39023b = binderC5601wm;
+    }
+
+    @Override // p244y3.d
+    public final void a(p104k3.C6885b c6885b) {
+        try {
+            p224w3.p.b(this.f39023b.f39669C.getClass().getCanonicalName() + "failed to load mediation ad: ErrorCode = " + c6885b.a() + ". ErrorMessage = " + c6885b.c() + ". ErrorDomain = " + c6885b.b());
+            this.f39022a.i5(c6885b.d());
+            this.f39022a.m1(c6885b.a(), c6885b.c());
+            this.f39022a.D(c6885b.a());
+        } catch (android.os.RemoteException e6) {
+            p224w3.p.e("", e6);
+        }
+    }
+}

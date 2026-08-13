@@ -1,0 +1,194 @@
+.class public final Lu/N;
+.super Ljava/lang/Object;
+.source "SourceFile"
+
+# interfaces
+.implements Lu/K;
+
+
+# instance fields
+.field private final a:F
+
+.field private final b:F
+
+.field private final c:F
+
+.field private final d:Lu/j0;
+
+
+# direct methods
+.method static constructor <clinit>()V
+    .locals 0
+
+    return-void
+.end method
+
+.method public constructor <init>(FFF)V
+    .locals 1
+
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+
+    iput p1, p0, Lu/N;->a:F
+
+    iput p2, p0, Lu/N;->b:F
+
+    iput p3, p0, Lu/N;->c:F
+
+    new-instance p3, Lu/j0;
+
+    const/high16 v0, 0x3f800000    # 1.0f
+
+    invoke-direct {p3, v0}, Lu/j0;-><init>(F)V
+
+    invoke-virtual {p3, p1}, Lu/j0;->d(F)V
+
+    invoke-virtual {p3, p2}, Lu/j0;->f(F)V
+
+    iput-object p3, p0, Lu/N;->d:Lu/j0;
+
+    return-void
+.end method
+
+.method public synthetic constructor <init>(FFFILy7/k;)V
+    .locals 0
+
+    .prologue
+    and-int/lit8 p5, p4, 0x1
+
+    if-eqz p5, :cond_0
+
+    const/high16 p1, 0x3f800000    # 1.0f
+
+    :cond_0
+    and-int/lit8 p5, p4, 0x2
+
+    if-eqz p5, :cond_1
+
+    const p2, 0x44bb8000    # 1500.0f
+
+    :cond_1
+    and-int/lit8 p4, p4, 0x4
+
+    if-eqz p4, :cond_2
+
+    const p3, 0x3c23d70a    # 0.01f
+
+    :cond_2
+    invoke-direct {p0, p1, p2, p3}, Lu/N;-><init>(FFF)V
+
+    return-void
+.end method
+
+
+# virtual methods
+.method public bridge synthetic a(Lu/x0;)Lu/B0;
+    .locals 0
+
+    invoke-static {p0, p1}, Lu/J;->b(Lu/K;Lu/x0;)Lu/B0;
+
+    move-result-object p1
+
+    return-object p1
+.end method
+
+.method public synthetic a(Lu/x0;)Lu/I0;
+    .locals 0
+
+    invoke-static {p0, p1}, Lu/J;->c(Lu/K;Lu/x0;)Lu/I0;
+
+    move-result-object p1
+
+    return-object p1
+.end method
+
+.method public b(JFFF)F
+    .locals 2
+
+    const-wide/32 v0, 0xf4240
+
+    div-long/2addr p1, v0
+
+    iget-object v0, p0, Lu/N;->d:Lu/j0;
+
+    invoke-virtual {v0, p4}, Lu/j0;->e(F)V
+
+    iget-object p4, p0, Lu/N;->d:Lu/j0;
+
+    invoke-virtual {p4, p3, p5, p1, p2}, Lu/j0;->g(FFJ)J
+
+    move-result-wide p1
+
+    invoke-static {p1, p2}, Lu/Y;->c(J)F
+
+    move-result p1
+
+    return p1
+.end method
+
+.method public c(FFF)J
+    .locals 2
+
+    iget-object v0, p0, Lu/N;->d:Lu/j0;
+
+    invoke-virtual {v0}, Lu/j0;->b()F
+
+    move-result v0
+
+    iget-object v1, p0, Lu/N;->d:Lu/j0;
+
+    invoke-virtual {v1}, Lu/j0;->a()F
+
+    move-result v1
+
+    sub-float/2addr p1, p2
+
+    iget p2, p0, Lu/N;->c:F
+
+    div-float/2addr p1, p2
+
+    div-float/2addr p3, p2
+
+    const/high16 p2, 0x3f800000    # 1.0f
+
+    invoke-static {v0, v1, p3, p1, p2}, Lu/i0;->b(FFFFF)J
+
+    move-result-wide p1
+
+    const-wide/32 v0, 0xf4240
+
+    mul-long/2addr p1, v0
+
+    return-wide p1
+.end method
+
+.method public d(FFF)F
+    .locals 0
+
+    const/4 p1, 0x0
+
+    return p1
+.end method
+
+.method public e(JFFF)F
+    .locals 2
+
+    const-wide/32 v0, 0xf4240
+
+    div-long/2addr p1, v0
+
+    iget-object v0, p0, Lu/N;->d:Lu/j0;
+
+    invoke-virtual {v0, p4}, Lu/j0;->e(F)V
+
+    iget-object p4, p0, Lu/N;->d:Lu/j0;
+
+    invoke-virtual {p4, p3, p5, p1, p2}, Lu/j0;->g(FFJ)J
+
+    move-result-wide p1
+
+    invoke-static {p1, p2}, Lu/Y;->b(J)F
+
+    move-result p1
+
+    return p1
+.end method

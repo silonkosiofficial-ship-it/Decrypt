@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="md_theme_background">#101418</color>
+    <color name="md_theme_error">#ffb4ab</color>
+    <color name="md_theme_errorContainer">#93000a</color>
+    <color name="md_theme_inverseOnSurface">#2d3135</color>
+    <color name="md_theme_inversePrimary">#31628d</color>
+    <color name="md_theme_inverseSurface">#e0e2e8</color>
+    <color name="md_theme_onBackground">#e0e2e8</color>
+    <color name="md_theme_onError">#690005</color>
+    <color name="md_theme_onErrorContainer">#ffdad6</color>
+    <color name="md_theme_onPrimary">#003355</color>
+    <color name="md_theme_onPrimaryContainer">#cfe5ff</color>
+    <color name="md_theme_onSecondary">#492900</color>
+    <color name="md_theme_onSecondaryContainer">#ffdcbd</color>
+    <color name="md_theme_onSurface">#e0e2e8</color>
+    <color name="md_theme_onSurfaceVariant">#c2c7cf</color>
+    <color name="md_theme_onTertiary">#00382d</color>
+    <color name="md_theme_onTertiaryContainer">#a1f2dc</color>
+    <color name="md_theme_outline">#8c9199</color>
+    <color name="md_theme_outlineVariant">#42474e</color>
+    <color name="md_theme_primary">#9dcbfb</color>
+    <color name="md_theme_primaryContainer">#124a73</color>
+    <color name="md_theme_secondary">#fcb974</color>
+    <color name="md_theme_secondaryContainer">#693c00</color>
+    <color name="md_theme_surface">#101418</color>
+    <color name="md_theme_surfaceBright">#36393e</color>
+    <color name="md_theme_surfaceContainer">#1d2024</color>
+    <color name="md_theme_surfaceContainerHigh">#272a2f</color>
+    <color name="md_theme_surfaceContainerHighest">#32353a</color>
+    <color name="md_theme_surfaceContainerLow">#181c20</color>
+    <color name="md_theme_surfaceContainerLowest">#0b0e12</color>
+    <color name="md_theme_surfaceDim">#101418</color>
+    <color name="md_theme_surfaceVariant">#42474e</color>
+    <color name="md_theme_tertiary">#85d6c0</color>
+    <color name="md_theme_tertiaryContainer">#005143</color>
+</resources>

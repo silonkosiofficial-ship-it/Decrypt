@@ -1,0 +1,40 @@
+.class public final synthetic Lf9/b;
+.super Ljava/lang/Object;
+.source "SourceFile"
+
+# interfaces
+.implements Lx7/q;
+
+
+# instance fields
+.field public final synthetic C:Lf9/f;
+
+
+# direct methods
+.method public synthetic constructor <init>(Lf9/f;)V
+    .locals 0
+
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+
+    iput-object p1, p0, Lf9/b;->C:Lf9/f;
+
+    return-void
+.end method
+
+
+# virtual methods
+.method public final j(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+    .locals 1
+
+    iget-object v0, p0, Lf9/b;->C:Lf9/f;
+
+    invoke-static {p1}, Landroidx/appcompat/app/D;->a(Ljava/lang/Object;)V
+
+    const/4 p1, 0x0
+
+    invoke-static {v0, p1, p2, p3}, Lf9/f;->v(Lf9/f;Le9/a;Ljava/lang/Object;Ljava/lang/Object;)Lx7/q;
+
+    move-result-object p1
+
+    return-object p1
+.end method
