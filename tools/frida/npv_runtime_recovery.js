@@ -109,6 +109,7 @@ function hookProtectedApplication() {
     log('ProtectedMyApplication.attachBaseContext() entry');
     const result = attachBaseContext.call(this, context);
     log('ProtectedMyApplication.attachBaseContext() exit; DexProtector bootstrap should have returned');
+    enumerateInterestingClasses('after attachBaseContext');
     return result;
   };
 
@@ -116,6 +117,7 @@ function hookProtectedApplication() {
     log('ProtectedMyApplication.onCreate() entry');
     const result = onCreate.call(this);
     log('ProtectedMyApplication.onCreate() exit; zInq(Object) material handoff should have completed');
+    enumerateInterestingClasses('after onCreate');
     return result;
   };
 }
@@ -292,6 +294,107 @@ function hookCryptoAndEncoding() {
   };
 }
 
+function enumerateInterestingClasses(reason) {
+  Java.enumerateLoadedClasses({
+    onMatch(name) {
+      if (name.indexOf('com.napsternetlabs') === 0 || name.indexOf('libnpvtunnel') === 0 ||
+          name.toLowerCase().indexOf('cloud') >= 0 || name.toLowerCase().indexOf('config') >= 0) {
+        log(`loaded-class[${reason}] ${name}`);
+      }
+    },
+    onComplete() {
+      log(`loaded-class enumeration complete (${reason})`);
+    }
+  });
+}
+
+function hookOkHttpIfPresent() {
+  const RequestBuilder = Java.use('okhttp3.Request$Builder');
+  const urlString = RequestBuilder.url.overload('java.lang.String');
+  urlString.implementation = function hookedOkHttpUrlString(url) {
+    log(`OkHttp Request.Builder.url(String) ${url}`);
+    return urlString.call(this, url);
+  };
+
+  const header = RequestBuilder.header.overload('java.lang.String', 'java.lang.String');
+  header.implementation = function hookedOkHttpHeader(name, value) {
+    log(`OkHttp header ${name}: ${value}`);
+    return header.call(this, name, value);
+  };
+
+  const addHeader = RequestBuilder.addHeader.overload('java.lang.String', 'java.lang.String');
+  addHeader.implementation = function hookedOkHttpAddHeader(name, value) {
+    log(`OkHttp addHeader ${name}: ${value}`);
+    return addHeader.call(this, name, value);
+  };
+
+  const RealCall = Java.use('okhttp3.RealCall');
+  const execute = RealCall.execute.overload();
+  execute.implementation = function hookedOkHttpExecute() {
+    const request = this.request();
+    log(`OkHttp execute ${request.method()} ${request.url()}`);
+    const response = execute.call(this);
+    log(`OkHttp response code=${response.code()} url=${response.request().url()}`);
+    return response;
+  };
+}
+
+function hookJsonAndCompression() {
+  const JSONObject = Java.use('org.json.JSONObject');
+  const jsonStringInit = JSONObject.$init.overload('java.lang.String');
+  jsonStringInit.implementation = function hookedJsonObjectString(input) {
+    log(`JSONObject(String) len=${input.length}, preview=${input.substring(0, Math.min(input.length, 1024))}`);
+    return jsonStringInit.call(this, input);
+  };
+
+  const GZIPInputStream = Java.use('java.util.zip.GZIPInputStream');
+  const gzipInit = GZIPInputStream.$init.overload('java.io.InputStream');
+  gzipInit.implementation = function hookedGzipInit(stream) {
+    log(`GZIPInputStream(InputStream) stream=${stream}`);
+    return gzipInit.call(this, stream);
+  };
+
+  const Inflater = Java.use('java.util.zip.Inflater');
+  const inflateBytes = Inflater.inflate.overload('[B');
+  inflateBytes.implementation = function hookedInflateBytes(output) {
+    const count = inflateBytes.call(this, output);
+    if (count > 0) {
+      const arr = javaBytesToArray(output).slice(0, Math.min(count, 512));
+      log(`Inflater.inflate([B]) count=${count}, preview=${printablePreview(arr, 512)}`);
+    }
+    return count;
+  };
+}
+
+function hookNativeLoadingAndRegistration() {
+  const Runtime = Java.use('java.lang.Runtime');
+  const loadLibrary0 = Runtime.loadLibrary0.overload('java.lang.ClassLoader', 'java.lang.String');
+  loadLibrary0.implementation = function hookedLoadLibrary0(loader, libname) {
+    log(`Runtime.loadLibrary0(loader=${loader}, lib=${libname})`);
+    return loadLibrary0.call(this, loader, libname);
+  };
+
+  const load0 = Runtime.load0.overload('java.lang.Class', 'java.lang.String');
+  load0.implementation = function hookedLoad0(fromClass, filename) {
+    log(`Runtime.load0(class=${fromClass}, file=${filename})`);
+    return load0.call(this, fromClass, filename);
+  };
+}
+
+function hookNativeRegisterNatives() {
+  const registerNatives = Module.findExportByName(null, 'RegisterNatives');
+  if (!registerNatives) {
+    log('RegisterNatives export not found');
+    return;
+  }
+  Interceptor.attach(registerNatives, {
+    onEnter(args) {
+      this.methodCount = args[3].toInt32();
+      log(`JNI RegisterNatives count=${this.methodCount}`);
+    }
+  });
+}
+
 function hookTunnelSinks() {
   const Libnpvtunnel = Java.use('libnpvtunnel.Libnpvtunnel');
   const validateSshConfig = Libnpvtunnel.validateSshConfig.overload('[B');
@@ -341,6 +444,10 @@ Java.perform(function main() {
   installSafely('InMemoryDexClassLoader hooks', hookInMemoryDexClassLoader);
   installSafely('file-write hooks', hookFileWrites);
   installSafely('network hooks', hookNetwork);
+  installSafely('OkHttp hooks', hookOkHttpIfPresent);
+  installSafely('JSON/compression hooks', hookJsonAndCompression);
+  installSafely('native load hooks', hookNativeLoadingAndRegistration);
+  installSafely('JNI RegisterNatives hook', hookNativeRegisterNatives);
   installSafely('crypto/encoding hooks', hookCryptoAndEncoding);
   installSafely('libnpvtunnel sink hooks', hookTunnelSinks);
   log(`hooks installed; dump directory: ${DUMP_DIR}`);

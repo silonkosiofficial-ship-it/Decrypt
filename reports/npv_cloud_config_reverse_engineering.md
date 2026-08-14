@@ -9,6 +9,33 @@ This update intentionally does **not** continue searching the visible JADX tree 
 
 A Frida runtime recovery harness has been added at `tools/frida/npv_runtime_recovery.js`. It is designed to capture class-loader events, in-memory DEX buffers, file-backed DEX extraction, Java crypto/encoding boundaries, HTTP connection activity, and final `libnpvtunnel` SSH/Xray config sinks.
 
+## Runtime recovery continuation — transformation-path instrumentation
+
+No recovered runtime DEX or live device trace is present in this repository yet, so the cloud unlock algorithm, key source, IV/nonce/salt, and endpoint remain unknown. The correct next step is still to run the harness and collect evidence at runtime rather than infer from the visible JADX tree.
+
+The Frida harness has been extended to better capture the real cloud transformation path after DexProtector initialization:
+
+* It now enumerates loaded `com.napsternetlabs.*`, `libnpvtunnel.*`, and cloud/config-named classes immediately after `attachBaseContext()` and `onCreate()` return. This is the first practical checkpoint for hidden runtime class availability after the `libalice`/`libdpboot` handoff.
+* It now hooks Java native-library loading through `Runtime.loadLibrary0()` and `Runtime.load0()` plus best-effort `RegisterNatives` logging. This helps identify whether a recovered cloud importer crosses into app-owned native code before plaintext reaches the tunnel sinks.
+* It now adds optional OkHttp request/response hooks when `okhttp3` is present at runtime. These hooks log request URLs, methods, headers, and response codes without assuming that the protected runtime uses `HttpURLConnection`.
+* It now adds JSON/compression checkpoints through `JSONObject(String)`, `GZIPInputStream`, and `Inflater.inflate(byte[])`. These are transformation boundary hooks: if the cloud response becomes JSON after Base64, cipher output, gzip, or inflate, the log order should expose that edge.
+
+Evidence expected from a successful run:
+
+```text
+DexProtector bootstrap returns
+ ↓
+new hidden cloud/import classes appear in loaded-class enumeration
+ ↓
+HTTP/OkHttp request logs reveal URL, headers, method, and response code
+ ↓
+Base64/Cipher/GZIP/Inflater/JSONObject hooks reveal transformation boundaries
+ ↓
+validateSshConfig(), validateV2rayConfig(), SshTunnel.start(), or XrayTunnel.start() dumps the final plaintext config
+```
+
+Important limitation: these additions are instrumentation, not a recovered result. Until a runtime trace or dumped DEX artifact is analyzed, there is still no proven cloud-config decryptor or Python-reimplementable algorithm.
+
 ## Current proven boundary
 
 ### Startup chain
