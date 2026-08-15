@@ -369,6 +369,210 @@ function hookProtectedApplication() {
   };
 }
 
+
+let nativePropertyHookInstalled = false;
+let nativePropertyObserverInstalled = false;
+let nativePropertyRetryTimer = null;
+
+function findExportAddress(libraryName, symbolName) {
+  const attempts = [];
+
+  attempts.push(function processModuleFindExport() {
+    if (typeof Process === 'undefined' || typeof Process.findModuleByName !== 'function') {
+      return null;
+    }
+    const module = Process.findModuleByName(libraryName);
+    if (module === null || module === undefined || typeof module.findExportByName !== 'function') {
+      return null;
+    }
+    return module.findExportByName(symbolName);
+  });
+
+  attempts.push(function processModuleEnumerateExports() {
+    if (typeof Process === 'undefined' || typeof Process.findModuleByName !== 'function') {
+      return null;
+    }
+    const module = Process.findModuleByName(libraryName);
+    if (module === null || module === undefined || typeof module.enumerateExports !== 'function') {
+      return null;
+    }
+    const exports = module.enumerateExports();
+    for (let i = 0; i < exports.length; i += 1) {
+      if (exports[i].name === symbolName) {
+        return exports[i].address;
+      }
+    }
+    return null;
+  });
+
+  attempts.push(function apiResolverExports() {
+    if (typeof ApiResolver !== 'function') {
+      return null;
+    }
+    const resolver = new ApiResolver('module');
+    const matches = resolver.enumerateMatches(`exports:${libraryName}!${symbolName}`);
+    return matches.length > 0 ? matches[0].address : null;
+  });
+
+  attempts.push(function moduleGetExportByName() {
+    if (typeof Module === 'undefined' || typeof Module.getExportByName !== 'function') {
+      return null;
+    }
+    try {
+      return Module.getExportByName(libraryName, symbolName);
+    } catch (_) {
+      return null;
+    }
+  });
+
+  attempts.push(function moduleFindExportByNameLegacy() {
+    if (typeof Module === 'undefined' || typeof Module.findExportByName !== 'function') {
+      return null;
+    }
+    return Module.findExportByName(libraryName, symbolName);
+  });
+
+  attempts.push(function moduleFindGlobalExportByName() {
+    if (typeof Module === 'undefined' || typeof Module.findGlobalExportByName !== 'function') {
+      return null;
+    }
+    return Module.findGlobalExportByName(symbolName);
+  });
+
+  attempts.push(function moduleGetGlobalExportByName() {
+    if (typeof Module === 'undefined' || typeof Module.getGlobalExportByName !== 'function') {
+      return null;
+    }
+    try {
+      return Module.getGlobalExportByName(symbolName);
+    } catch (_) {
+      return null;
+    }
+  });
+
+  for (let i = 0; i < attempts.length; i += 1) {
+    try {
+      const address = attempts[i]();
+      if (address !== null && address !== undefined) {
+        log(`resolved ${libraryName}!${symbolName} via ${attempts[i].name} @ ${address}`);
+        return address;
+      }
+    } catch (error) {
+      log(`resolver ${attempts[i].name} failed for ${libraryName}!${symbolName}: ${error}`);
+    }
+  }
+
+  return null;
+}
+
+function installNativePropertyHookAt(address, libraryName, symbolName, reason) {
+  if (nativePropertyHookInstalled) {
+    return true;
+  }
+
+  Interceptor.attach(address, {
+    onEnter(args) {
+      this.symbolName = `${libraryName}!${symbolName}`;
+      this.key = '<unreadable>';
+      try {
+        this.key = args[0].readCString();
+      } catch (error) {
+        this.key = `<key read failed: ${error}>`;
+      }
+      this.valuePtr = args[1];
+    },
+    onLeave(retval) {
+      let value = '<unreadable>';
+      try {
+        if (this.valuePtr !== null && this.valuePtr !== undefined && !this.valuePtr.isNull()) {
+          value = this.valuePtr.readCString();
+        }
+      } catch (error) {
+        value = `<value read failed: ${error}>`;
+      }
+      log(`NativeProperty ${this.symbolName} key=${this.key} => ${value} retval=${safeString(retval)}`);
+    }
+  });
+
+  nativePropertyHookInstalled = true;
+  log(`installed native property hook ${libraryName}!${symbolName} @ ${address} reason=${reason}`);
+  return true;
+}
+
+function tryInstallNativePropertyHook(reason) {
+  if (nativePropertyHookInstalled) {
+    return true;
+  }
+
+  const libraryName = 'libc.so';
+  const symbolName = '__system_property_get';
+
+  try {
+    const address = findExportAddress(libraryName, symbolName);
+    if (address === null || address === undefined) {
+      log(`native property hook pending; ${libraryName}!${symbolName} not resolved reason=${reason}`);
+      return false;
+    }
+    return installNativePropertyHookAt(address, libraryName, symbolName, reason);
+  } catch (error) {
+    log(`native property hook install attempt failed reason=${reason}: ${error}`);
+    return false;
+  }
+}
+
+function installNativePropertyLateResolution() {
+  if (!nativePropertyObserverInstalled && typeof Process !== 'undefined' && typeof Process.attachModuleObserver === 'function') {
+    try {
+      Process.attachModuleObserver({
+        onAdded(module) {
+          try {
+            if (!nativePropertyHookInstalled && module.name === 'libc.so') {
+              log(`module observer noticed ${module.name}; retrying native property hook`);
+              tryInstallNativePropertyHook('module-observer');
+            }
+          } catch (error) {
+            log(`module observer native property retry failed: ${error}`);
+          }
+        }
+      });
+      nativePropertyObserverInstalled = true;
+      log('installed native property module observer');
+    } catch (error) {
+      log(`skipped native property module observer: ${error}`);
+    }
+  } else if (!nativePropertyObserverInstalled) {
+    log('native property module observer unavailable in this Frida runtime');
+  }
+
+  if (nativePropertyRetryTimer === null && typeof setInterval === 'function') {
+    let attempts = 0;
+    nativePropertyRetryTimer = setInterval(function () {
+      attempts += 1;
+      if (nativePropertyHookInstalled) {
+        clearInterval(nativePropertyRetryTimer);
+        nativePropertyRetryTimer = null;
+        log(`native property retry loop stopped after successful install attempts=${attempts}`);
+        return;
+      }
+      if (attempts > 40) {
+        clearInterval(nativePropertyRetryTimer);
+        nativePropertyRetryTimer = null;
+        log('native property retry loop stopped; hook still unresolved after 40 attempts');
+        return;
+      }
+      tryInstallNativePropertyHook(`retry-${attempts}`);
+    }, 250);
+    log('installed native property retry loop intervalMs=250 maxAttempts=40');
+  }
+}
+
+function hookNativeSystemProperties() {
+  log('installing native property instrumentation layer');
+  if (tryInstallNativePropertyHook('initial')) {
+    return;
+  }
+  installNativePropertyLateResolution();
+
 function hookNativeSystemProperties() {
   const candidates = [
     ['libc.so', '__system_property_get']
@@ -413,6 +617,7 @@ function hookNativeSystemProperties() {
       log(`skipped native property hook ${libraryName}!${symbolName}: ${error}`);
     }
   });
+
 }
 
 setImmediate(function () {
