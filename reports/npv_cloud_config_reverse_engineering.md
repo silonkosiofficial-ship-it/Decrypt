@@ -680,3 +680,209 @@ SshTunnel.start(byte[], ...) or XrayTunnel.start(byte[], ...)     [source-proven
 
 The cloud-config unlock mechanism is still inside unrecovered protected runtime code. This continuation strengthens the DexProtector loading evidence and documents why `assets/classes.dex.dat` must be dynamically unpacked/dumped before the exact cloud payload transformation, algorithm, key source, IV/nonce/salt, and JSON/config construction function can be named with evidence.
 
+
+## DP:789 security-gate trace continuation
+
+### Scope of this continuation
+
+This section continues from the previous DexProtector boundary findings instead of re-searching the cloud importer. The immediate blocker is the proven runtime failure:
+
+```text
+ProtectedMyApplication startup
+ ↓
+DexProtector bootstrap/native handoff
+ ↓
+java.lang.RuntimeException: DP: 789 011503210500
+ ↓
+ProtectedMyApplication$ProtectedMyApplication.qk(Throwable,String)
+ ↓
+MessageGuardException(Throwable,String)
+ ↓
+ProtectedMyApplication$ProtectedMyApplication.fAHytsI(Context,Throwable,String)
+ ↓
+crash/security Activity
+ ↓
+process stops before cloud-config import/decryption
+```
+
+### 1. Where `MessageGuardException` is created or thrown
+
+**Trigger location:** `ProtectedMyApplication$ProtectedMyApplication.qk(Throwable,String)` creates the wrapper exception.
+
+**Class:** `com.napsternetlabs.napsternetv.ProtectedMyApplication$ProtectedMyApplication`
+
+**Function:** `qk(Throwable th, String id)`
+
+**Relevant code:**
+
+* If the caller supplied no ID, `qk()` generates a UUID-derived ID with `Ccwtchjno()`.
+* It constructs `new MessageGuardException(th, id)`.
+* If the ID was generated locally, it also calls native `ProtectedMyApplication.MainActivity.d.a(Throwable,String)` with the wrapper and ID.
+* It returns the wrapper to `fAHytsI()`.
+
+**Input values:**
+
+* `th`: the original `Throwable`; in the observed run this is the cause whose message is `DP: 789 011503210500`.
+* `id`: normally `null` from the catch handlers, so a UUID-like support/report ID is generated.
+
+**Output data:**
+
+* A `MessageGuardException` whose `guard` string is built from `th.getMessage()`, static `MessageGuardException.fingerprint`, and the generated ID.
+
+**Connection to next step:** `fAHytsI()` throws the returned wrapper after optionally launching the crash/security UI.
+
+**Evidence:** `MessageGuardException(Throwable,String)` wraps `th.getLocalizedMessage()` as its displayed exception message, copies `th.getMessage()` into the guard payload, appends the static fingerprint and optional ID, and `toString()` emits `MessageGuardException_<base64 guard>: <localized message>`. `qk()` is the only visible constructor site in this startup wrapper path and returns the wrapper to `fAHytsI()`.
+
+### 2. Code path reaching `qk()` and `fAHytsI()`
+
+There are two visible startup catch paths that can feed the DP exception into the same wrapper:
+
+```text
+ProtectedMyApplication.attachBaseContext(Context)
+  super.attachBaseContext(context)
+  ProtectedMyApplication$ProtectedMyApplication$a$a.a(this)  // load libalice + native context/filesDir handoff
+  J()                                                        // visible certificate SHA-256 check
+  System.loadLibrary("dpboot")
+  uapgpA()                                                   // native DexProtector bootstrap
+  catch Throwable th -> ProtectedMyApplication$ProtectedMyApplication.j(this, th)
+    -> qscdn(this, th, null)
+    -> ye(this, th, null) on SDK >= 23
+    -> Handler.postAtFrontOfQueue(new ProtectedMyApplication$ProtectedMyApplication(...))
+    -> run()
+    -> fAHytsI(this, th, null)
+    -> qk(th, null)
+```
+
+```text
+ProtectedMyApplication.onCreate()
+  super.onCreate()
+  ProtectedMyApplication$ProtectedMyApplication$a$a.b(this)  // native application-context handoff
+  gwj()                                                      // native byte source
+  32-byte Java substitution transform
+  zInq(transformed32)                                        // native DexProtector state/material handoff
+  catch Throwable th -> ProtectedMyApplication$ProtectedMyApplication.j(this, th)
+    -> same qscdn/ye/run/fAHytsI/qk wrapper path
+```
+
+**Interpretation:** `qk()` and `fAHytsI()` are not the first security decision point. They are the common reporting/crash wrapper for an earlier `Throwable` emitted by either the `attachBaseContext()` native bootstrap path or the `onCreate()` native material handoff path.
+
+### 3. Checks immediately visible before the exception
+
+#### Visible Java certificate/signature check
+
+**Trigger location:** `ProtectedMyApplication.J()`
+
+**Class/function:** `com.napsternetlabs.napsternetv.ProtectedMyApplication.J()`
+
+**Input values:** Android package signatures from `PackageManager.getPackageInfo(getPackageName(), 64).signatures`.
+
+**Condition:**
+
+* fail if no signatures are returned;
+* fail if more than one signing certificate is returned;
+* fail if SHA-256 of the sole signing certificate is not `e03dcc51aad45456b97b6331c08a2f6a67eb9516e931a3e6cefcd0eeee5801d4`.
+
+**Reasoning:** This is a real visible security gate, but it is **not** the observed DP:789 gate. Its thrown messages are `Signing certificates not found`, `Package is signed by multiple signing certificates [...]`, or `Certificate mismatch...`; they do not contain `DP: 789 011503210500`.
+
+**Confidence:** High that this gate exists; high that it is not the observed DP:789 if the observed cause message is exactly `DP: 789 011503210500`.
+
+#### Native DexProtector gate
+
+**Trigger location:** native code reached from either `uapgpA()` or `zInq(Object)`.
+
+**Class/function:** visible Java declaration is in `com.napsternetlabs.napsternetv.ProtectedMyApplication`; implementation is native in the DexProtector libraries.
+
+**Input values proven statically:**
+
+* `uapgpA()` receives no Java arguments but runs after `libalice` and `libdpboot` are loaded, after native code receives `Context` and `filesDir`, and after `J()` passes.
+* `zInq(Object)` receives the 32-byte Java-transformed array produced from native `gwj()[0..31]` and two static 256-byte lookup tables.
+
+**Condition that fails:** not recoverable from the visible Java/smali alone. The only proven failed value is the resulting native exception message: `DP: 789 011503210500`.
+
+**Reason:** The literal `DP: 789 011503210500`, `789`, and `011503210500` were not found as Java/smali constants; native-library strings are also not exposing a readable DP message. That means the exact check and message are produced dynamically/obfuscated in native DexProtector code or hidden runtime code, not by the visible Java crash wrapper.
+
+**Confidence:** High that the decision point is before `qk()`/`fAHytsI()` and inside a native DexProtector boundary; medium on whether it is specifically `uapgpA()` vs `zInq(Object)` until runtime hooks capture which native method throws.
+
+### 4. What DP code 789 means in the visible UI layer
+
+The crash/security UI parses the integer immediately after `DP:` and chooses a user-facing message:
+
+* `code > 4096`: warning page that can be accepted and writes the little-endian integer to private file `rtc`; bit labels shown in the UI are root, emulator, custom firmware, and Xposed.
+* `code == 773`: unofficial installer/vendor page.
+* `754 <= code <= 757`: emulator-specific page.
+* other `700 < code < 800`: generic insecure-environment page.
+* otherwise: generic device-incompatibility page.
+
+Therefore `789` is classified by the app's own visible UI as a generic `700..799` DexProtector security-requirement failure, **not** as the emulator-specific visible bucket (`754..757`) and not as the visible installer bucket (`773`). This does not prove that emulator properties are unrelated; it only proves the app does not map `789` to the hard-coded emulator-only message.
+
+**Confidence:** High for the UI classification; low for the underlying cause category because the underlying native code remains hidden.
+
+### 5. Current answer in the required format
+
+**Trigger location:** Native DexProtector startup/material handoff before Java crash wrapping.
+
+**Class:** visible boundary is `com.napsternetlabs.napsternetv.ProtectedMyApplication`.
+
+**Function:** either `uapgpA()` from `attachBaseContext()` or `zInq(Object)` from `onCreate()`; `qk()`/`fAHytsI()` only wrap/report the native failure.
+
+**Relevant code:**
+
+```text
+attachBaseContext(): load libalice -> native context/filesDir handoff -> J() certificate hash check -> load libdpboot -> uapgpA() -> catch Throwable -> j()/qscdn()/ye()/run()/fAHytsI()/qk()
+
+onCreate(): native app-context handoff -> gwj() -> Java 32-byte transform -> zInq(transformed32) -> catch Throwable -> j()/qscdn()/ye()/run()/fAHytsI()/qk()
+```
+
+**Input values:**
+
+* Package certificate SHA-256 for the visible `J()` check.
+* Android `Context`, app private files directory, native `gwj()` bytes, and the derived 32-byte array for the native DexProtector checks.
+* Runtime environment/device state is very likely read by native code, but the exact fields/properties are not proven from static evidence.
+
+**Condition that fails:** Proven only as a native/generated `RuntimeException` with message `DP: 789 011503210500`. Static evidence does not expose the exact predicate such as a specific `Build.*`, `ro.*` property, root file, debugger flag, signature, attestation result, or server response.
+
+**Reason:** The Java frames named in the stack trace (`qk()` and `fAHytsI()`) are post-decision wrapper/reporting code. The visible Java certificate check has different messages and therefore does not match DP:789. The visible UI maps `789` to generic DexProtector security requirements, not the hard-coded emulator-only or installer-only buckets.
+
+**Confidence level:**
+
+* High: `MessageGuardException` is created in `qk()` and thrown from `fAHytsI()`.
+* High: `qk()`/`fAHytsI()` are not the original security decision.
+* High: visible certificate SHA-256 gate is not the observed DP:789 message.
+* Medium: original throw is native DexProtector code reached from `uapgpA()` or `zInq(Object)`.
+* Low: exact category of DP:789 (emulator/root/debugger/tamper/attestation/server-side/other) without a runtime trace of the native throw site.
+
+### Runtime tracer added for the exact decision point
+
+A focused Frida tracer was added at `tools/frida/npv_dp789_gate_trace.js`.
+
+Usage:
+
+```text
+frida -U -f com.napsternetlabs.napsternetv -l tools/frida/npv_dp789_gate_trace.js --no-pause
+```
+
+The tracer hooks:
+
+* `RuntimeException(String)` and `RuntimeException(String,Throwable)` to capture the first Java creation stack when a message contains `DP:`.
+* `MessageGuardException(Throwable,String)` to confirm the wrapper inputs.
+* `ProtectedMyApplication$ProtectedMyApplication.qk()` and `fAHytsI()` to log wrapper flow.
+* `ProtectedMyApplication.attachBaseContext()` and `onCreate()` to separate the two startup phases.
+* native Java declarations `uapgpA()`, `gwj()`, and `zInq(Object)` to identify which visible JNI boundary throws before the wrapper catches it.
+
+Expected proof from a successful run:
+
+```text
+native uapgpA THROW=java.lang.RuntimeException: DP: 789 011503210500
+```
+
+or
+
+```text
+native zInq THROW=java.lang.RuntimeException: DP: 789 011503210500
+```
+
+That output will identify the exact visible boundary. If the throw still appears only after the native method returns, the next step is native instrumentation around `libdpboot.so`/`libdexprotector.so` exception construction, system-property reads, file probes, package/signature reads, and any network/attestation calls during the same timestamp window.
+
+### Next investigation step
+
+Run the new DP:789 tracer on the same Android Studio Google Play AVD that reaches the guard. Do not change emulator properties yet. The first required evidence is which native boundary throws and whether any Java-visible inputs immediately precede the DP message. After that, attach native hooks for the specific boundary window rather than guessing between emulator, root, debugger/tamper, certificate, Play Integrity/SafetyNet, server-side validation, or another DexProtector mechanism.
