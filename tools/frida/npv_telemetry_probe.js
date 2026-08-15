@@ -369,6 +369,7 @@ function hookProtectedApplication() {
   };
 }
 
+
 let nativePropertyHookInstalled = false;
 let nativePropertyObserverInstalled = false;
 let nativePropertyRetryTimer = null;
@@ -571,6 +572,52 @@ function hookNativeSystemProperties() {
     return;
   }
   installNativePropertyLateResolution();
+
+function hookNativeSystemProperties() {
+  const candidates = [
+    ['libc.so', '__system_property_get']
+  ];
+
+  candidates.forEach(function (candidate) {
+    const libraryName = candidate[0];
+    const symbolName = candidate[1];
+    try {
+      const address = Module.findExportByName(libraryName, symbolName);
+      if (address === null) {
+        log(`native property symbol unavailable ${libraryName}!${symbolName}`);
+        return;
+      }
+      Interceptor.attach(address, {
+        onEnter(args) {
+          this.symbolName = `${libraryName}!${symbolName}`;
+          this.key = '<unreadable>';
+          try {
+            this.key = args[0].readCString();
+          } catch (error) {
+            this.key = `<key read failed: ${error}>`;
+          }
+          this.valuePtr = args[1];
+        },
+        onLeave(retval) {
+          let value = '<unreadable>';
+          try {
+            if (this.symbolName.indexOf('__system_property_get') >= 0 && !this.valuePtr.isNull()) {
+              value = this.valuePtr.readCString();
+            } else {
+              value = `<retval=${safeString(retval)}>`;
+            }
+          } catch (error) {
+            value = `<value read failed: ${error}>`;
+          }
+          log(`NativeProperty ${this.symbolName} key=${this.key} => ${value} retval=${safeString(retval)}`);
+        }
+      });
+      log(`installed native property hook ${libraryName}!${symbolName} @ ${address}`);
+    } catch (error) {
+      log(`skipped native property hook ${libraryName}!${symbolName}: ${error}`);
+    }
+  });
+
 }
 
 setImmediate(function () {
