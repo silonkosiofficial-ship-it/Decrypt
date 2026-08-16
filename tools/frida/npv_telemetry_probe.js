@@ -583,6 +583,219 @@ function hookNativeSystemProperties() {
   installNativePropertyLateResolution();
 }
 
+
+
+let nativeInspectionHookInstalled = false;
+const fdPathMap = {};
+
+function isInterestingInspectionPath(path) {
+  if (path === null || path === undefined) {
+    return false;
+  }
+  const text = safeString(path);
+  return text.indexOf('/proc/self/maps') >= 0 ||
+    text.indexOf('/proc/self/status') >= 0 ||
+    text.indexOf('/proc/self/task/') >= 0 ||
+    text.indexOf('/proc/self/fd') >= 0 ||
+    text.indexOf('/proc/self/cmdline') >= 0 ||
+    text.indexOf('/proc/self/environ') >= 0 ||
+    text.indexOf('/proc/self/mount') >= 0 ||
+    text.indexOf('/proc/self/attr') >= 0 ||
+    text.indexOf('/proc/self/exe') >= 0 ||
+    text.indexOf('/proc/self/mem') >= 0 ||
+    text.indexOf('/proc/thread-self') >= 0 ||
+    text.indexOf('/proc/') >= 0 ||
+    text.indexOf('/sys/') >= 0 ||
+    text.indexOf('/dev/socket') >= 0 ||
+    text.indexOf('frida') >= 0 ||
+    text.indexOf('gum-js-loop') >= 0 ||
+    text.indexOf('gmain') >= 0 ||
+    text.indexOf('tracerpid') >= 0 ||
+    text.indexOf('TracerPid') >= 0;
+}
+
+function readCStringArg(ptrValue, label) {
+  try {
+    if (ptrValue === null || ptrValue === undefined || ptrValue.isNull()) {
+      return 'null';
+    }
+    return ptrValue.readCString();
+  } catch (error) {
+    return `<${label} read failed: ${error}>`;
+  }
+}
+
+function pointerToSigned(value) {
+  try {
+    return value.toInt32();
+  } catch (_) {
+    return Number(value);
+  }
+}
+
+function logNativeInspection(event) {
+  log(`NativeInspection ${event}`);
+}
+
+function attachNativeInspectionHook(libraryName, symbolName, handlers) {
+  try {
+    const address = findExportAddress(libraryName, symbolName);
+    if (address === null || address === undefined) {
+      log(`native inspection symbol unavailable ${libraryName}!${symbolName}`);
+      return false;
+    }
+    Interceptor.attach(address, handlers);
+    log(`installed native inspection hook ${libraryName}!${symbolName} @ ${address}`);
+    return true;
+  } catch (error) {
+    log(`FAILED installing native inspection hook ${libraryName}!${symbolName}: ${error}`);
+    return false;
+  }
+}
+
+function installPathInspectionHook(symbolName, pathArgIndex, options) {
+  const opts = options || {};
+  return attachNativeInspectionHook('libc.so', symbolName, {
+    onEnter(args) {
+      this.symbolName = symbolName;
+      this.path = readCStringArg(args[pathArgIndex], 'path');
+      this.dirfd = opts.dirfdArgIndex !== undefined ? pointerToSigned(args[opts.dirfdArgIndex]) : null;
+      this.mode = opts.modeArgIndex !== undefined ? pointerToSigned(args[opts.modeArgIndex]) : null;
+      this.modeString = opts.modeStringArgIndex !== undefined ? readCStringArg(args[opts.modeStringArgIndex], 'mode') : null;
+      this.flags = opts.flagsArgIndex !== undefined ? pointerToSigned(args[opts.flagsArgIndex]) : null;
+      this.shouldLog = opts.logAll === true || isInterestingInspectionPath(this.path);
+      if (this.shouldLog) {
+        const dirfdPart = this.dirfd === null ? '' : ` dirfd=${this.dirfd}`;
+        const flagsPart = this.flags === null ? '' : ` flags=${this.flags}`;
+        const modePart = this.mode === null ? '' : ` mode=${this.mode}`;
+        const modeStringPart = this.modeString === null ? '' : ` modeString=${this.modeString}`;
+        logNativeInspection(`${this.symbolName} enter path=${this.path}${dirfdPart}${flagsPart}${modePart}${modeStringPart}`);
+      }
+    },
+    onLeave(retval) {
+      if (!this.shouldLog) {
+        return;
+      }
+      const rv = pointerToSigned(retval);
+      if (opts.trackFd === true && rv >= 0) {
+        fdPathMap[rv] = this.path;
+      }
+      logNativeInspection(`${this.symbolName} leave path=${this.path} retval=${safeString(retval)} signedRet=${rv}`);
+    }
+  });
+}
+
+function hookNativeInspection() {
+  if (nativeInspectionHookInstalled) {
+    return;
+  }
+
+  log('installing native inspection instrumentation layer');
+
+  const installed = [];
+
+  installed.push(attachNativeInspectionHook('libc.so', 'ptrace', {
+    onEnter(args) {
+      this.request = pointerToSigned(args[0]);
+      this.pid = pointerToSigned(args[1]);
+      this.addr = args[2];
+      this.data = args[3];
+      logNativeInspection(`ptrace enter request=${this.request} pid=${this.pid} addr=${safeString(this.addr)} data=${safeString(this.data)}`);
+    },
+    onLeave(retval) {
+      logNativeInspection(`ptrace leave request=${this.request} pid=${this.pid} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+    }
+  }));
+
+  installed.push(installPathInspectionHook('open', 0, { flagsArgIndex: 1, modeArgIndex: 2, trackFd: true, logAll: true }));
+  installed.push(installPathInspectionHook('open64', 0, { flagsArgIndex: 1, modeArgIndex: 2, trackFd: true, logAll: true }));
+  installed.push(installPathInspectionHook('openat', 1, { dirfdArgIndex: 0, flagsArgIndex: 2, modeArgIndex: 3, trackFd: true, logAll: true }));
+  installed.push(installPathInspectionHook('openat64', 1, { dirfdArgIndex: 0, flagsArgIndex: 2, modeArgIndex: 3, trackFd: true, logAll: true }));
+  installed.push(installPathInspectionHook('fopen', 0, { modeStringArgIndex: 1, logAll: true }));
+  installed.push(installPathInspectionHook('fopen64', 0, { modeStringArgIndex: 1, logAll: true }));
+  installed.push(installPathInspectionHook('access', 0, { modeArgIndex: 1, logAll: true }));
+  installed.push(installPathInspectionHook('faccessat', 1, { dirfdArgIndex: 0, modeArgIndex: 2, flagsArgIndex: 3, logAll: true }));
+  installed.push(installPathInspectionHook('stat', 0, { logAll: true }));
+  installed.push(installPathInspectionHook('stat64', 0, { logAll: true }));
+  installed.push(installPathInspectionHook('lstat', 0, { logAll: true }));
+  installed.push(installPathInspectionHook('lstat64', 0, { logAll: true }));
+  installed.push(installPathInspectionHook('fstatat', 1, { dirfdArgIndex: 0, flagsArgIndex: 3, logAll: true }));
+  installed.push(installPathInspectionHook('readlink', 0, { logAll: true }));
+  installed.push(installPathInspectionHook('readlinkat', 1, { dirfdArgIndex: 0, logAll: true }));
+
+
+  installed.push(attachNativeInspectionHook('libc.so', 'fstat', {
+    onEnter(args) {
+      this.fd = pointerToSigned(args[0]);
+      this.path = Object.prototype.hasOwnProperty.call(fdPathMap, this.fd) ? fdPathMap[this.fd] : '<unknown>';
+      this.shouldLog = isInterestingInspectionPath(this.path);
+      if (this.shouldLog) {
+        logNativeInspection(`fstat enter fd=${this.fd} path=${this.path}`);
+      }
+    },
+    onLeave(retval) {
+      if (this.shouldLog) {
+        logNativeInspection(`fstat leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+      }
+    }
+  }));
+
+  installed.push(attachNativeInspectionHook('libc.so', 'fstat64', {
+    onEnter(args) {
+      this.fd = pointerToSigned(args[0]);
+      this.path = Object.prototype.hasOwnProperty.call(fdPathMap, this.fd) ? fdPathMap[this.fd] : '<unknown>';
+      this.shouldLog = isInterestingInspectionPath(this.path);
+      if (this.shouldLog) {
+        logNativeInspection(`fstat64 enter fd=${this.fd} path=${this.path}`);
+      }
+    },
+    onLeave(retval) {
+      if (this.shouldLog) {
+        logNativeInspection(`fstat64 leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+      }
+    }
+  }));
+
+  installed.push(attachNativeInspectionHook('libc.so', 'read', {
+    onEnter(args) {
+      this.fd = pointerToSigned(args[0]);
+      this.count = pointerToSigned(args[2]);
+      this.path = Object.prototype.hasOwnProperty.call(fdPathMap, this.fd) ? fdPathMap[this.fd] : '<unknown>';
+      this.shouldLog = isInterestingInspectionPath(this.path);
+      if (this.shouldLog) {
+        logNativeInspection(`read enter fd=${this.fd} path=${this.path} count=${this.count}`);
+      }
+    },
+    onLeave(retval) {
+      if (this.shouldLog) {
+        logNativeInspection(`read leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+      }
+    }
+  }));
+
+  installed.push(attachNativeInspectionHook('libc.so', 'close', {
+    onEnter(args) {
+      this.fd = pointerToSigned(args[0]);
+      this.path = Object.prototype.hasOwnProperty.call(fdPathMap, this.fd) ? fdPathMap[this.fd] : '<unknown>';
+      this.shouldLog = isInterestingInspectionPath(this.path);
+      if (this.shouldLog) {
+        logNativeInspection(`close enter fd=${this.fd} path=${this.path}`);
+      }
+    },
+    onLeave(retval) {
+      if (this.shouldLog) {
+        logNativeInspection(`close leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+      }
+      if (Object.prototype.hasOwnProperty.call(fdPathMap, this.fd)) {
+        delete fdPathMap[this.fd];
+      }
+    }
+  }));
+
+  nativeInspectionHookInstalled = installed.some(function (value) { return value; });
+  log(`native inspection instrumentation install complete installedAny=${nativeInspectionHookInstalled}`);
+}
+
 function hookNativeLibraryLoading() {
   if (nativeLibraryHookInstalled) {
     return;
@@ -771,6 +984,7 @@ function scheduleJavaInstrumentation() {
 setImmediate(function () {
   log('probe loading');
   hookNativeSystemProperties();
+  hookNativeInspection();
   hookNativeLibraryLoading();
   scheduleJavaInstrumentation();
 });
