@@ -1,0 +1,170 @@
+'use strict';
+
+/*
+ * NPV zInq decision probe.
+ *
+ * Read-only diagnostic instrumentation for the protected startup decision on an
+ * authorized development/test build. This probe records Java/JNI/native inputs
+ * around ProtectedMyApplication.zInq(Object) and preserves all original return
+ * values, exceptions, errno values, and process behavior.
+ *
+ * Usage:
+ *   frida -U -f com.napsternetlabs.napsternetv -l tools/frida/npv_zinq_decision_probe.js
+ */
+
+const TAG = 'npv-zinq-decision';
+const PKG = 'com.napsternetlabs.napsternetv';
+const PMA = `${PKG}.ProtectedMyApplication`;
+const MAX_PREVIEW = 256;
+
+let seq = 0;
+let phase = 'pre-java';
+let zinqWindow = false;
+let Throwable = null;
+let JavaThread = null;
+const fdPaths = {};
+const nativeMethods = {};
+
+function now() { return new Date().toISOString(); }
+function tid() { try { return Process.getCurrentThreadId(); } catch (_) { return '?'; } }
+function log(msg) { seq += 1; console.log(`[${TAG} #${seq} ${now()} tid=${tid()} phase=${phase}] ${msg}`); }
+function safe(v) { try { return String(v); } catch (e) { return `<string failed: ${e}>`; } }
+function ptrSafe(p) { return p === null || p === undefined ? ptr('0') : p; }
+function cstr(p) { try { return ptrSafe(p).isNull() ? 'null' : ptrSafe(p).readCString(); } catch (e) { return `<cstr failed: ${e}>`; } }
+function moduleOf(addr) {
+  try {
+    const m = Process.findModuleByAddress(ptr(addr));
+    return m ? `${m.name}+${ptr(addr).sub(m.base)}` : '<no-module>';
+  } catch (e) { return `<module failed: ${e}>`; }
+}
+function nativeBacktrace(ctx) {
+  try {
+    return globalThis.Thread.backtrace(ctx, Backtracer.ACCURATE).map(a => `${a} ${moduleOf(a)}`).join(' <= ');
+  } catch (_) {
+    try { return globalThis.Thread.backtrace(ctx, Backtracer.FUZZY).map(a => `${a} ${moduleOf(a)}`).join(' <= '); } catch (e) { return `<bt failed: ${e}>`; }
+  }
+}
+function javaStack() {
+  try { return Java.use('android.util.Log').getStackTraceString(Throwable.$new()); } catch (e) { return `<java stack failed: ${e}>`; }
+}
+function bytesHex(u8, max) {
+  const n = Math.min(u8.length, max || MAX_PREVIEW);
+  const out = [];
+  for (let i = 0; i < n; i += 1) out.push(('0' + u8[i].toString(16)).slice(-2));
+  return out.join('') + (u8.length > n ? `...(+${u8.length - n})` : '');
+}
+function interestingPath(p) {
+  const s = safe(p).toLowerCase();
+  return zinqWindow || s.indexOf('/proc') >= 0 || s.indexOf('/sys') >= 0 || s.indexOf('/system') >= 0 ||
+    s.indexOf('/vendor') >= 0 || s.indexOf('magisk') >= 0 || s.indexOf('su') >= 0 || s.indexOf('frida') >= 0 ||
+    s.indexOf('.dexp-queue') >= 0 || s.indexOf('.pb') >= 0 || s.indexOf('base.apk') >= 0;
+}
+function hookExport(name, callbacks) {
+  let addr = null;
+  try { addr = Module.findGlobalExportByName(name); } catch (_) {}
+  if (!addr) { try { addr = Module.findExportByName(null, name); } catch (_) {} }
+  if (!addr) { log(`native export unavailable ${name}`); return; }
+  Interceptor.attach(addr, callbacks);
+  log(`hooked ${name} @ ${addr}`);
+}
+function logLoadedModules(label) {
+  try {
+    Process.enumerateModules().filter(m => /lib(dpboot|dexprotector|alice|gojni|sqlite|art|android_runtime|c\+\+|log|dl|c)\.so|napsternet|npv/i.test(m.name))
+      .forEach(m => log(`${label} module ${m.name} base=${m.base} size=${m.size} path=${m.path}`));
+  } catch (e) { log(`${label} module enumeration failed: ${e}`); }
+}
+
+function installNativeHooks() {
+  hookExport('__system_property_get', {
+    onEnter(args) { this.key = cstr(args[0]); this.valuePtr = args[1]; this.bt = nativeBacktrace(this.context); },
+    onLeave(ret) { let v = cstr(this.valuePtr); if (zinqWindow || /^(ro\.|persist\.|vendor\.)/.test(this.key)) log(`prop.get key=${this.key} value=${v} ret=${ret} caller=${moduleOf(this.returnAddress)} bt=${this.bt}`); }
+  });
+  ['open', 'openat', 'access', 'faccessat', 'stat', 'stat64', 'lstat', 'readlink', 'readlinkat'].forEach(name => hookExport(name, {
+    onEnter(args) {
+      this.name = name;
+      this.path = name === 'openat' || name === 'faccessat' || name === 'readlinkat' ? cstr(args[1]) : cstr(args[0]);
+      this.doLog = interestingPath(this.path);
+      if (this.doLog) this.bt = nativeBacktrace(this.context);
+    },
+    onLeave(ret) { const rv = ret.toInt32(); if ((this.name === 'open' || this.name === 'openat') && rv >= 0) fdPaths[rv] = this.path; if (this.doLog) log(`fs.${this.name} path=${this.path} ret=${ret} caller=${moduleOf(this.returnAddress)} bt=${this.bt}`); }
+  }));
+  hookExport('read', {
+    onEnter(args) { this.fd = args[0].toInt32(); this.buf = args[1]; this.path = fdPaths[this.fd] || ''; this.doLog = zinqWindow || interestingPath(this.path); },
+    onLeave(ret) { if (this.doLog) log(`fs.read fd=${this.fd} path=${this.path} ret=${ret}`); }
+  });
+  ['fork', 'execve', 'system', 'popen'].forEach(name => hookExport(name, {
+    onEnter(args) { log(`process.${name} arg0=${cstr(args[0])} caller=${moduleOf(this.returnAddress)} bt=${nativeBacktrace(this.context)}`); },
+    onLeave(ret) { log(`process.${name} ret=${ret}`); }
+  }));
+}
+
+function installRegisterNativesHook() {
+  const art = Process.findModuleByName('libart.so');
+  if (!art) { log('libart.so unavailable for RegisterNatives scan'); return; }
+  art.enumerateSymbols().filter(s => s.name.indexOf('RegisterNatives') >= 0 && s.name.indexOf('CheckJNI') < 0).forEach(s => {
+    Interceptor.attach(s.address, {
+      onEnter(args) {
+        this.methods = [];
+        const env = Java.vm.getEnv();
+        const clsName = (() => { try { return env.getClassName(args[1]); } catch (e) { return `<class failed: ${e}>`; } })();
+        const count = args[3].toInt32();
+        const methodSize = Process.pointerSize * 3;
+        for (let i = 0; i < count; i += 1) {
+          const entry = args[2].add(i * methodSize);
+          const name = cstr(entry.readPointer());
+          const sig = cstr(entry.add(Process.pointerSize).readPointer());
+          const fn = entry.add(Process.pointerSize * 2).readPointer();
+          const mod = moduleOf(fn);
+          this.methods.push(`${clsName}.${name}${sig} @ ${fn} ${mod}`);
+          if (clsName === PMA && (name === 'zInq' || name === 'gwj' || name === 'uapgpA')) nativeMethods[name] = { fn: fn, module: mod, sig: sig };
+        }
+      },
+      onLeave(ret) { if (this.methods.some(m => m.indexOf(PMA) >= 0 || m.indexOf('napsternetlabs') >= 0)) this.methods.forEach(m => log(`RegisterNatives ret=${ret} ${m}`)); }
+    });
+    log(`hooked RegisterNatives candidate ${s.name} @ ${s.address}`);
+  });
+}
+
+Java.perform(function () {
+  Throwable = Java.use('java.lang.Throwable');
+  JavaThread = Java.use('java.lang.Thread');
+  installRegisterNativesHook();
+  installNativeHooks();
+
+  const Build = Java.use('android.os.Build');
+  const Version = Java.use('android.os.Build$VERSION');
+  function buildSnapshot(label) {
+    ['BRAND','MANUFACTURER','MODEL','DEVICE','PRODUCT','HARDWARE','FINGERPRINT','TAGS','TYPE','SUPPORTED_ABIS'].forEach(k => { try { log(`Build ${label} ${k}=${safe(Build[k].value)}`); } catch (_) {} });
+    try { log(`Build ${label} VERSION.RELEASE=${Version.RELEASE.value} SDK_INT=${Version.SDK_INT.value}`); } catch (_) {}
+  }
+
+  const SystemProperties = Java.use('android.os.SystemProperties');
+  SystemProperties.get.overload('java.lang.String').implementation = function (k) { const r = this.get(k); if (zinqWindow || /^ro\.|^persist\.|^vendor\./.test(safe(k))) log(`SystemProperties.get ${k} => ${r}\n${javaStack()}`); return r; };
+  SystemProperties.get.overload('java.lang.String', 'java.lang.String').implementation = function (k, d) { const r = this.get(k, d); if (zinqWindow || /^ro\.|^persist\.|^vendor\./.test(safe(k))) log(`SystemProperties.getDefault ${k} default=${d} => ${r}\n${javaStack()}`); return r; };
+
+  const Runtime = Java.use('java.lang.Runtime');
+  Runtime.exec.overloads.forEach(ov => { ov.implementation = function () { log(`Runtime.exec argc=${arguments.length} args=${Array.prototype.map.call(arguments, safe).join(' | ')}\n${javaStack()}`); return ov.apply(this, arguments); }; });
+
+  const PMAClass = Java.use(PMA);
+  PMAClass.attachBaseContext.overload('android.content.Context').implementation = function (ctx) { const old = phase; phase = 'attachBaseContext'; log('attachBaseContext enter'); buildSnapshot('attachBaseContext-enter'); logLoadedModules('attachBaseContext-enter'); try { return this.attachBaseContext(ctx); } finally { log('attachBaseContext exit'); logLoadedModules('attachBaseContext-exit'); phase = old; } };
+  PMAClass.onCreate.overload().implementation = function () { const old = phase; phase = 'onCreate'; log('onCreate enter'); buildSnapshot('onCreate-enter'); try { return this.onCreate(); } finally { log('onCreate exit'); logLoadedModules('onCreate-exit'); phase = old; } };
+
+  ['uapgpA', 'gwj', 'zInq'].forEach(name => {
+    PMAClass[name].overloads.forEach(ov => { ov.implementation = function () {
+      const old = phase; phase = `java-native-${name}`; const was = zinqWindow; if (name === 'zInq') zinqWindow = true;
+      log(`${name} enter argc=${arguments.length} nativeMapping=${nativeMethods[name] ? JSON.stringify(nativeMethods[name]) : '<unknown>'}`);
+      if (name === 'zInq' && arguments.length > 0) { try { const arr = Java.cast(arguments[0], Java.use('[B')); const bytes = Java.array('byte', arr); log(`zInq arg0 byte[] length=${bytes.length} hex=${bytesHex(bytes.map(b => (b + 256) & 255), 64)}`); } catch (e) { log(`zInq arg0 preview failed: ${e} value=${safe(arguments[0])}`); } }
+      log(`java stack at ${name} entry\n${javaStack()}`);
+      try { const r = ov.apply(this, arguments); log(`${name} return=${safe(r)}`); return r; }
+      catch (e) { log(`${name} THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; }
+      finally { if (name === 'zInq') zinqWindow = was; phase = old; }
+    }; });
+  });
+
+  const RuntimeException = Java.use('java.lang.RuntimeException');
+  RuntimeException.$init.overload('java.lang.String').implementation = function (s) { const r = this.$init(s); if (safe(s).indexOf('DP:') >= 0) log(`RuntimeException DP message=${s}\n${javaStack()}`); return r; };
+  const MGE = Java.use(`${PKG}.MessageGuardException`);
+  MGE.$init.overload('java.lang.Throwable', 'java.lang.String').implementation = function (t, id) { log(`MessageGuardException cause=${safe(t)} causeMessage=${t ? safe(t.getMessage()) : 'null'} id=${safe(id)}`); return this.$init(t, id); };
+
+  log('npv zInq decision probe installed (read-only)');
+});
