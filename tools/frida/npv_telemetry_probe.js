@@ -588,6 +588,60 @@ function hookNativeSystemProperties() {
 let nativeInspectionHookInstalled = false;
 const fdPathMap = {};
 
+function isBufferPreviewPath(path) {
+  if (path === null || path === undefined) {
+    return false;
+  }
+  const text = safeString(path);
+  return text.indexOf('maps') >= 0 ||
+    text.indexOf('status') >= 0 ||
+    text.indexOf('cmdline') >= 0 ||
+    text.indexOf('auxv') >= 0 ||
+    text.indexOf('mounts') >= 0;
+}
+
+const MAX_NATIVE_READ_PREVIEW_BYTES = 512;
+
+function escapeNativeReadPreview(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i += 1) {
+    const value = bytes[i];
+    if (value === 0) {
+      out.push('\\0');
+    } else if (value === 9) {
+      out.push('\\t');
+    } else if (value === 10) {
+      out.push('\\n');
+    } else if (value === 13) {
+      out.push('\\r');
+    } else if (value >= 32 && value <= 126) {
+      out.push(String.fromCharCode(value));
+    } else {
+      out.push(`\\x${(`0${value.toString(16)}`).slice(-2)}`);
+    }
+  }
+  return out.join('');
+}
+
+function readNativeReadPreview(bufferPtr, byteCount, label) {
+  try {
+    if (bufferPtr === null || bufferPtr === undefined || bufferPtr.isNull()) {
+      return 'null';
+    }
+    if (byteCount <= 0) {
+      return '';
+    }
+    const previewLength = Math.min(byteCount, MAX_NATIVE_READ_PREVIEW_BYTES);
+    const byteArray = bufferPtr.readByteArray(previewLength);
+    if (byteArray === null || byteArray === undefined) {
+      return '<null byte array>';
+    }
+    return escapeNativeReadPreview(new Uint8Array(byteArray));
+  } catch (error) {
+    return `<${label} preview failed: ${error}>`;
+  }
+}
+
 function isInterestingInspectionPath(path) {
   if (path === null || path === undefined) {
     return false;
@@ -756,22 +810,38 @@ function hookNativeInspection() {
     }
   }));
 
-  installed.push(attachNativeInspectionHook('libc.so', 'read', {
-    onEnter(args) {
-      this.fd = pointerToSigned(args[0]);
-      this.count = pointerToSigned(args[2]);
-      this.path = Object.prototype.hasOwnProperty.call(fdPathMap, this.fd) ? fdPathMap[this.fd] : '<unknown>';
-      this.shouldLog = isInterestingInspectionPath(this.path);
-      if (this.shouldLog) {
-        logNativeInspection(`read enter fd=${this.fd} path=${this.path} count=${this.count}`);
+  function installReadBufferInspectionHook(symbolName, options) {
+    const opts = options || {};
+    return attachNativeInspectionHook('libc.so', symbolName, {
+      onEnter(args) {
+        this.fd = pointerToSigned(args[0]);
+        this.bufferPtr = args[1];
+        this.count = pointerToSigned(args[2]);
+        this.offset = opts.offsetArgIndex !== undefined ? safeString(args[opts.offsetArgIndex]) : null;
+        this.path = Object.prototype.hasOwnProperty.call(fdPathMap, this.fd) ? fdPathMap[this.fd] : '<unknown>';
+        this.shouldLog = isInterestingInspectionPath(this.path);
+        this.shouldPreview = isBufferPreviewPath(this.path);
+        if (this.shouldLog) {
+          const offsetPart = this.offset === null ? '' : ` offset=${this.offset}`;
+          logNativeInspection(`${symbolName} enter fd=${this.fd} path=${this.path} count=${this.count}${offsetPart}`);
+        }
+      },
+      onLeave(retval) {
+        if (!this.shouldLog) {
+          return;
+        }
+        const signedRet = pointerToSigned(retval);
+        const previewPart = this.shouldPreview && signedRet > 0 ?
+          ` previewBytes=${Math.min(signedRet, MAX_NATIVE_READ_PREVIEW_BYTES)} preview=${JSON.stringify(readNativeReadPreview(this.bufferPtr, signedRet, symbolName))}` :
+          '';
+        logNativeInspection(`${symbolName} leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${signedRet}${previewPart}`);
       }
-    },
-    onLeave(retval) {
-      if (this.shouldLog) {
-        logNativeInspection(`read leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
-      }
-    }
-  }));
+    });
+  }
+
+  installed.push(installReadBufferInspectionHook('read'));
+  installed.push(installReadBufferInspectionHook('pread', { offsetArgIndex: 3 }));
+  installed.push(installReadBufferInspectionHook('pread64', { offsetArgIndex: 3 }));
 
   installed.push(attachNativeInspectionHook('libc.so', 'close', {
     onEnter(args) {
