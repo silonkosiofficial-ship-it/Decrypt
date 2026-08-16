@@ -101,6 +101,71 @@ function currentJavaStack() {
   }
 }
 
+
+function currentTid() {
+  try {
+    if (typeof Process !== 'undefined' && typeof Process.getCurrentThreadId === 'function') {
+      return Process.getCurrentThreadId();
+    }
+  } catch (_) {}
+  return '<tid unavailable>';
+}
+
+function currentPid() {
+  try {
+    if (typeof Process !== 'undefined' && Process.id !== undefined) {
+      return Process.id;
+    }
+  } catch (_) {}
+  return '<pid unavailable>';
+}
+
+function moduleOffsetForAddress(address) {
+  try {
+    const module = Process.findModuleByAddress(address);
+    if (module !== null && module !== undefined) {
+      return `${module.name}+${address.sub(module.base)}`;
+    }
+  } catch (_) {}
+  return safeString(address);
+}
+
+function symbolForAddress(address) {
+  try {
+    const symbol = DebugSymbol.fromAddress(address);
+    if (symbol !== null && symbol !== undefined) {
+      const symbolText = safeString(symbol);
+      if (symbolText !== address.toString()) {
+        return `${symbolText} (${moduleOffsetForAddress(address)})`;
+      }
+    }
+  } catch (_) {}
+  return moduleOffsetForAddress(address);
+}
+
+function compactBacktrace(context, maxFrames) {
+  try {
+    const frames = Thread.backtrace(context, Backtracer.ACCURATE);
+    const limit = Math.min(frames.length, maxFrames || 8);
+    const out = [];
+    for (let i = 0; i < limit; i += 1) {
+      out.push(symbolForAddress(frames[i]));
+    }
+    return out.join(' <= ');
+  } catch (error) {
+    return `<backtrace unavailable: ${error}>`;
+  }
+}
+
+function errnoText(invocation) {
+  try {
+    if (invocation !== null && invocation !== undefined && invocation.errno !== undefined) {
+      return safeString(invocation.errno);
+    }
+  } catch (_) {}
+  return '<errno unavailable>';
+}
+
 function installSafely(name, installer) {
   try {
     installer();
@@ -593,7 +658,11 @@ function isBufferPreviewPath(path) {
     return false;
   }
   const text = safeString(path);
-  return text.indexOf('maps') >= 0 ||
+  return text.indexOf('.dexp-queue') >= 0 ||
+    text.indexOf('.pb') >= 0 ||
+    text.indexOf('base.apk') >= 0 ||
+    text.indexOf('base.vdex') >= 0 ||
+    text.indexOf('maps') >= 0 ||
     text.indexOf('status') >= 0 ||
     text.indexOf('cmdline') >= 0 ||
     text.indexOf('auxv') >= 0 ||
@@ -647,7 +716,11 @@ function isInterestingInspectionPath(path) {
     return false;
   }
   const text = safeString(path);
-  return text.indexOf('/proc/self/maps') >= 0 ||
+  return text.indexOf('.dexp-queue') >= 0 ||
+    text.indexOf('.pb') >= 0 ||
+    text.indexOf('base.apk') >= 0 ||
+    text.indexOf('base.vdex') >= 0 ||
+    text.indexOf('/proc/self/maps') >= 0 ||
     text.indexOf('/proc/self/status') >= 0 ||
     text.indexOf('/proc/self/task/') >= 0 ||
     text.indexOf('/proc/self/fd') >= 0 ||
@@ -688,7 +761,7 @@ function pointerToSigned(value) {
 }
 
 function logNativeInspection(event) {
-  log(`NativeInspection ${event}`);
+  log(`NativeInspection pid=${currentPid()} tid=${currentTid()} ${event}`);
 }
 
 function attachNativeInspectionHook(libraryName, symbolName, handlers) {
@@ -719,11 +792,12 @@ function installPathInspectionHook(symbolName, pathArgIndex, options) {
       this.flags = opts.flagsArgIndex !== undefined ? pointerToSigned(args[opts.flagsArgIndex]) : null;
       this.shouldLog = opts.logAll === true || isInterestingInspectionPath(this.path);
       if (this.shouldLog) {
+        this.caller = compactBacktrace(this.context, 6);
         const dirfdPart = this.dirfd === null ? '' : ` dirfd=${this.dirfd}`;
         const flagsPart = this.flags === null ? '' : ` flags=${this.flags}`;
         const modePart = this.mode === null ? '' : ` mode=${this.mode}`;
         const modeStringPart = this.modeString === null ? '' : ` modeString=${this.modeString}`;
-        logNativeInspection(`${this.symbolName} enter path=${this.path}${dirfdPart}${flagsPart}${modePart}${modeStringPart}`);
+        logNativeInspection(`${this.symbolName} enter path=${this.path}${dirfdPart}${flagsPart}${modePart}${modeStringPart} caller=${this.caller}`);
       }
     },
     onLeave(retval) {
@@ -734,7 +808,7 @@ function installPathInspectionHook(symbolName, pathArgIndex, options) {
       if (opts.trackFd === true && rv >= 0) {
         fdPathMap[rv] = this.path;
       }
-      logNativeInspection(`${this.symbolName} leave path=${this.path} retval=${safeString(retval)} signedRet=${rv}`);
+      logNativeInspection(`${this.symbolName} leave path=${this.path} retval=${safeString(retval)} signedRet=${rv} errno=${errnoText(this)}`);
     }
   });
 }
@@ -754,10 +828,11 @@ function hookNativeInspection() {
       this.pid = pointerToSigned(args[1]);
       this.addr = args[2];
       this.data = args[3];
-      logNativeInspection(`ptrace enter request=${this.request} pid=${this.pid} addr=${safeString(this.addr)} data=${safeString(this.data)}`);
+      this.caller = compactBacktrace(this.context, 6);
+      logNativeInspection(`ptrace enter request=${this.request} targetPid=${this.pid} addr=${safeString(this.addr)} data=${safeString(this.data)} caller=${this.caller}`);
     },
     onLeave(retval) {
-      logNativeInspection(`ptrace leave request=${this.request} pid=${this.pid} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+      logNativeInspection(`ptrace leave request=${this.request} targetPid=${this.pid} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)} errno=${errnoText(this)}`);
     }
   }));
 
@@ -789,7 +864,7 @@ function hookNativeInspection() {
     },
     onLeave(retval) {
       if (this.shouldLog) {
-        logNativeInspection(`fstat leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+        logNativeInspection(`fstat leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)} errno=${errnoText(this)}`);
       }
     }
   }));
@@ -805,7 +880,7 @@ function hookNativeInspection() {
     },
     onLeave(retval) {
       if (this.shouldLog) {
-        logNativeInspection(`fstat64 leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+        logNativeInspection(`fstat64 leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)} errno=${errnoText(this)}`);
       }
     }
   }));
@@ -834,7 +909,7 @@ function hookNativeInspection() {
         const previewPart = this.shouldPreview && signedRet > 0 ?
           ` previewBytes=${Math.min(signedRet, MAX_NATIVE_READ_PREVIEW_BYTES)} preview=${JSON.stringify(readNativeReadPreview(this.bufferPtr, signedRet, symbolName))}` :
           '';
-        logNativeInspection(`${symbolName} leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${signedRet}${previewPart}`);
+        logNativeInspection(`${symbolName} leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${signedRet} errno=${errnoText(this)}${previewPart}`);
       }
     });
   }
@@ -854,7 +929,7 @@ function hookNativeInspection() {
     },
     onLeave(retval) {
       if (this.shouldLog) {
-        logNativeInspection(`close leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)}`);
+        logNativeInspection(`close leave fd=${this.fd} path=${this.path} retval=${safeString(retval)} signedRet=${pointerToSigned(retval)} errno=${errnoText(this)}`);
       }
       if (Object.prototype.hasOwnProperty.call(fdPathMap, this.fd)) {
         delete fdPathMap[this.fd];
@@ -864,6 +939,38 @@ function hookNativeInspection() {
 
   nativeInspectionHookInstalled = installed.some(function (value) { return value; });
   log(`native inspection instrumentation install complete installedAny=${nativeInspectionHookInstalled}`);
+}
+
+
+function hookNativeTermination() {
+  log('installing native termination instrumentation layer');
+  const specs = [
+    ['exit', ['status']],
+    ['_exit', ['status']],
+    ['abort', []],
+    ['kill', ['targetPid', 'signal']],
+    ['tgkill', ['targetPid', 'targetTid', 'signal']],
+    ['raise', ['signal']],
+    ['pthread_kill', ['thread', 'signal']]
+  ];
+
+  specs.forEach(function (spec) {
+    const symbolName = spec[0];
+    const argNames = spec[1];
+    attachNativeInspectionHook('libc.so', symbolName, {
+      onEnter(args) {
+        const parts = [];
+        for (let i = 0; i < argNames.length; i += 1) {
+          parts.push(`${argNames[i]}=${pointerToSigned(args[i])}`);
+        }
+        this.caller = compactBacktrace(this.context, 12);
+        logNativeInspection(`Termination ${symbolName} enter ${parts.join(' ')} caller=${this.caller}`);
+      },
+      onLeave(retval) {
+        logNativeInspection(`Termination ${symbolName} leave retval=${safeString(retval)} signedRet=${pointerToSigned(retval)} errno=${errnoText(this)}`);
+      }
+    });
+  });
 }
 
 function hookNativeLibraryLoading() {
@@ -905,6 +1012,16 @@ function hookNativeLibraryLoading() {
       log(`FAILED installing native library load hook ${libraryName}!${symbolName}: ${error}`);
     }
   });
+}
+
+
+function hookJavaUncaughtExceptions() {
+  const Thread = Java.use('java.lang.Thread');
+  const dispatch = Thread.dispatchUncaughtException.overload('java.lang.Throwable');
+  dispatch.implementation = function (throwable) {
+    log(`JavaUncaughtException thread=${safeString(this)} throwable=${safeString(throwable)} message=${throwable ? safeString(throwable.getMessage()) : 'null'} stack=${throwable ? stackOf(throwable) : 'null'}`);
+    return dispatch.call(this, throwable);
+  };
 }
 
 function hookJavaLibraryLoading() {
@@ -985,6 +1102,7 @@ function installJavaInstrumentation(reason) {
     installSafely('MessageGuardException logging', hookMessageGuardException);
     installSafely('ProtectedMyApplication startup logging', hookProtectedApplication);
     installSafely('Java native library loading logging', hookJavaLibraryLoading);
+    installSafely('Java uncaught exception logging', hookJavaUncaughtExceptions);
     installSafely('ClassLoader observation', hookClassLoaderObservation);
     logBuildSnapshot('initial-java-perform');
 
@@ -1055,6 +1173,7 @@ setImmediate(function () {
   log('probe loading');
   hookNativeSystemProperties();
   hookNativeInspection();
+  hookNativeTermination();
   hookNativeLibraryLoading();
   scheduleJavaInstrumentation();
 });
