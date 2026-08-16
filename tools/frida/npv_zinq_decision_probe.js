@@ -24,10 +24,16 @@ let Throwable = null;
 let JavaThread = null;
 const fdPaths = {};
 const nativeMethods = {};
+const nativeHooked = {};
+const runStartedAt = Date.now();
 
 function now() { return new Date().toISOString(); }
 function tid() { try { return Process.getCurrentThreadId(); } catch (_) { return '?'; } }
-function log(msg) { seq += 1; console.log(`[${TAG} #${seq} ${now()} tid=${tid()} phase=${phase}] ${msg}`); }
+function elapsedMs() { return Date.now() - runStartedAt; }
+function threadName() {
+  try { return JavaThread ? safe(JavaThread.currentThread().getName()) : '<java-unavailable>'; } catch (_) { return '<java-unavailable>'; }
+}
+function log(msg) { seq += 1; console.log(`[${TAG} #${seq} ${now()} +${elapsedMs()}ms tid=${tid()} jthread=${threadName()} phase=${phase}] ${msg}`); }
 function safe(v) { try { return String(v); } catch (e) { return `<string failed: ${e}>`; } }
 function ptrSafe(p) { return p === null || p === undefined ? ptr('0') : p; }
 function cstr(p) { try { return ptrSafe(p).isNull() ? 'null' : ptrSafe(p).readCString(); } catch (e) { return `<cstr failed: ${e}>`; } }
@@ -37,6 +43,16 @@ function moduleOf(addr) {
     return m ? `${m.name}+${ptr(addr).sub(m.base)}` : '<no-module>';
   } catch (e) { return `<module failed: ${e}>`; }
 }
+function rangeOf(addr) {
+  try {
+    const a = ptr(addr);
+    const r = Process.findRangeByAddress(a);
+    if (!r) return '<no-range>';
+    const off = a.sub(r.base);
+    return `base=${r.base} size=${r.size} offset=${off} protection=${r.protection} file=${r.file ? r.file.path : '<anonymous>'}`;
+  } catch (e) { return `<range failed: ${e}>`; }
+}
+function describeAddress(addr) { return `${ptr(addr)} ${moduleOf(addr)} range{${rangeOf(addr)}}`; }
 function nativeBacktrace(ctx) {
   try {
     return globalThis.Thread.backtrace(ctx, Backtracer.ACCURATE).map(a => `${a} ${moduleOf(a)}`).join(' <= ');
@@ -52,6 +68,31 @@ function bytesHex(u8, max) {
   const out = [];
   for (let i = 0; i < n; i += 1) out.push(('0' + u8[i].toString(16)).slice(-2));
   return out.join('') + (u8.length > n ? `...(+${u8.length - n})` : '');
+}
+function boundedArrayValues(arr, max, transform) {
+  const n = Math.min(arr.length, max || MAX_PREVIEW);
+  const out = [];
+  for (let i = 0; i < n; i += 1) out.push(transform(arr[i]));
+  return { length: arr.length, preview: out, truncated: arr.length > n ? arr.length - n : 0 };
+}
+function javaObjectClassName(obj) {
+  if (obj === null || obj === undefined) return '<null>';
+  try { return safe(obj.getClass().getName()); } catch (e) { return `<class failed: ${e}>`; }
+}
+function inspectZinqObject(obj) {
+  const className = javaObjectClassName(obj);
+  if (obj === null || obj === undefined) return `class=${className} value=${safe(obj)}`;
+  if (className === '[B') {
+    const arr = Java.cast(obj, Java.use('[B'));
+    const vals = boundedArrayValues(arr, 64, v => (v + 256) & 255);
+    return `class=${className} byte[] length=${vals.length} hex=${bytesHex(vals.preview, vals.preview.length)}${vals.truncated ? ` truncated=+${vals.truncated}` : ''}`;
+  }
+  if (className === '[I') {
+    const arr = Java.cast(obj, Java.use('[I'));
+    const vals = boundedArrayValues(arr, 64, v => v | 0);
+    return `class=${className} int[] length=${vals.length} values=${vals.preview.join(',')}${vals.truncated ? `...(+${vals.truncated})` : ''}`;
+  }
+  return `class=${className} value=${safe(obj)}`;
 }
 function interestingPath(p) {
   const s = safe(p).toLowerCase();
@@ -98,6 +139,38 @@ function installNativeHooks() {
   }));
 }
 
+function maybeHookNativeMethod(name, fn) {
+  const key = `${name}@${fn}`;
+  if (nativeHooked[key]) return;
+  nativeHooked[key] = true;
+  try {
+    Interceptor.attach(fn, {
+      onEnter(args) {
+        this.name = name;
+        this.enteredAt = Date.now();
+        this.arg0 = args[2];
+        if (name === 'zInq') {
+          const old = phase;
+          phase = 'native-zInq';
+          try {
+            log(`native zInq enter fn=${describeAddress(fn)} caller=${describeAddress(this.returnAddress)} arg0Handle=${args[2]}`);
+            try { log(`native zInq arg0 ${inspectZinqObject(Java.cast(args[2], Java.use('java.lang.Object')))}`); } catch (e) { log(`native zInq arg0 inspect failed: ${e}`); }
+            log(`native zInq backtrace ${nativeBacktrace(this.context)}`);
+          } finally { phase = old; }
+        }
+      },
+      onLeave(ret) {
+        if (name === 'zInq') {
+          const old = phase;
+          phase = 'native-zInq';
+          try { log(`native zInq leave ret=${ret} durationMs=${Date.now() - this.enteredAt}`); } finally { phase = old; }
+        }
+      }
+    });
+    log(`hooked native ${name} @ ${describeAddress(fn)}`);
+  } catch (e) { log(`hook native ${name} @ ${fn} failed: ${e}`); }
+}
+
 function installRegisterNativesHook() {
   const art = Process.findModuleByName('libart.so');
   if (!art) { log('libart.so unavailable for RegisterNatives scan'); return; }
@@ -116,7 +189,10 @@ function installRegisterNativesHook() {
           const fn = entry.add(Process.pointerSize * 2).readPointer();
           const mod = moduleOf(fn);
           this.methods.push(`${clsName}.${name}${sig} @ ${fn} ${mod}`);
-          if (clsName === PMA && (name === 'zInq' || name === 'gwj' || name === 'uapgpA')) nativeMethods[name] = { fn: fn, module: mod, sig: sig };
+          if (clsName === PMA && (name === 'zInq' || name === 'gwj' || name === 'uapgpA')) {
+            nativeMethods[name] = { fn: safe(fn), module: mod, range: rangeOf(fn), sig: sig };
+            maybeHookNativeMethod(name, fn);
+          }
         }
       },
       onLeave(ret) { if (this.methods.some(m => m.indexOf(PMA) >= 0 || m.indexOf('napsternetlabs') >= 0)) this.methods.forEach(m => log(`RegisterNatives ret=${ret} ${m}`)); }
@@ -146,14 +222,14 @@ Java.perform(function () {
   Runtime.exec.overloads.forEach(ov => { ov.implementation = function () { log(`Runtime.exec argc=${arguments.length} args=${Array.prototype.map.call(arguments, safe).join(' | ')}\n${javaStack()}`); return ov.apply(this, arguments); }; });
 
   const PMAClass = Java.use(PMA);
-  PMAClass.attachBaseContext.overload('android.content.Context').implementation = function (ctx) { const old = phase; phase = 'attachBaseContext'; log('attachBaseContext enter'); buildSnapshot('attachBaseContext-enter'); logLoadedModules('attachBaseContext-enter'); try { return this.attachBaseContext(ctx); } finally { log('attachBaseContext exit'); logLoadedModules('attachBaseContext-exit'); phase = old; } };
-  PMAClass.onCreate.overload().implementation = function () { const old = phase; phase = 'onCreate'; log('onCreate enter'); buildSnapshot('onCreate-enter'); try { return this.onCreate(); } finally { log('onCreate exit'); logLoadedModules('onCreate-exit'); phase = old; } };
+  PMAClass.attachBaseContext.overload('android.content.Context').implementation = function (ctx) { const old = phase; phase = 'attachBaseContext'; log('attachBaseContext enter'); buildSnapshot('attachBaseContext-enter'); logLoadedModules('attachBaseContext-enter'); try { const r = this.attachBaseContext(ctx); log('attachBaseContext return normally'); return r; } catch (e) { log(`attachBaseContext THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { log('attachBaseContext exit/finally'); logLoadedModules('attachBaseContext-exit'); phase = old; } };
+  PMAClass.onCreate.overload().implementation = function () { const old = phase; phase = 'onCreate'; log('onCreate enter'); buildSnapshot('onCreate-enter'); try { const r = this.onCreate(); log('onCreate return normally'); return r; } catch (e) { log(`onCreate THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { log('onCreate exit/finally'); logLoadedModules('onCreate-exit'); phase = old; } };
 
   ['uapgpA', 'gwj', 'zInq'].forEach(name => {
     PMAClass[name].overloads.forEach(ov => { ov.implementation = function () {
       const old = phase; phase = `java-native-${name}`; const was = zinqWindow; if (name === 'zInq') zinqWindow = true;
       log(`${name} enter argc=${arguments.length} nativeMapping=${nativeMethods[name] ? JSON.stringify(nativeMethods[name]) : '<unknown>'}`);
-      if (name === 'zInq' && arguments.length > 0) { try { const arr = Java.cast(arguments[0], Java.use('[B')); const bytes = Java.array('byte', arr); log(`zInq arg0 byte[] length=${bytes.length} hex=${bytesHex(bytes.map(b => (b + 256) & 255), 64)}`); } catch (e) { log(`zInq arg0 preview failed: ${e} value=${safe(arguments[0])}`); } }
+      if (name === 'zInq' && arguments.length > 0) { try { log(`zInq arg0 ${inspectZinqObject(arguments[0])}`); } catch (e) { log(`zInq arg0 inspect failed: ${e} value=${safe(arguments[0])}`); } }
       log(`java stack at ${name} entry\n${javaStack()}`);
       try { const r = ov.apply(this, arguments); log(`${name} return=${safe(r)}`); return r; }
       catch (e) { log(`${name} THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; }
@@ -166,5 +242,5 @@ Java.perform(function () {
   const MGE = Java.use(`${PKG}.MessageGuardException`);
   MGE.$init.overload('java.lang.Throwable', 'java.lang.String').implementation = function (t, id) { log(`MessageGuardException cause=${safe(t)} causeMessage=${t ? safe(t.getMessage()) : 'null'} id=${safe(id)}`); return this.$init(t, id); };
 
-  log('npv zInq decision probe installed (read-only)');
+  log(`npv zInq decision probe installed (read-only) runStartedAt=${new Date(runStartedAt).toISOString()}`);
 });
