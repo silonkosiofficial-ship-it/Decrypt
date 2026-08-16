@@ -9,7 +9,7 @@
  * changing application state.
  *
  * Usage:
- *   frida -U -f com.napsternetlabs.napsternetv -l tools/frida/npv_telemetry_probe.js --no-pause
+ *   frida -U -f com.napsternetlabs.napsternetv -l tools/frida/npv_telemetry_probe.js
  */
 
 const TAG = 'npv-telemetry';
@@ -59,6 +59,10 @@ let javaReady = false;
 let startupPhase = 'pre-java';
 let sequence = 0;
 let Throwable = null;
+let javaInstrumentationInstalled = false;
+let javaRetryTimer = null;
+let nativeLibraryHookInstalled = false;
+const pendingClassHookNames = {};
 
 function now() {
   return new Date().toISOString();
@@ -101,8 +105,10 @@ function installSafely(name, installer) {
   try {
     installer();
     log(`installed ${name}`);
+    return true;
   } catch (error) {
-    log(`skipped ${name}: ${error}`);
+    log(`FAILED installing ${name}: ${error}`);
+    return false;
   }
 }
 
@@ -249,25 +255,28 @@ function hookReflectionBuildAccess() {
 function hookRuntimeExceptions() {
   const RuntimeException = Java.use('java.lang.RuntimeException');
 
+  function logDpRuntimeException(signature, instance, message, extra) {
+    if (message !== null && safeString(message).indexOf('DP: ') >= 0) {
+      log(`${signature} DP message=${safeString(message)}${extra || ''}`);
+      log(`${signature} DP constructorStack=${stackOf(instance)}`);
+    }
+  }
+
   const initString = RuntimeException.$init.overload('java.lang.String');
   initString.implementation = function (message) {
     const ret = initString.call(this, message);
-    if (message !== null && safeString(message).indexOf('DP: ') >= 0) {
-      log(`RuntimeException(String) DP message=${safeString(message)}`);
-      log(`RuntimeException(String) DP stack=${stackOf(this)}`);
-    }
+    logDpRuntimeException('RuntimeException(String)', this, message);
     return ret;
   };
+  log('installed RuntimeException(String) constructor hook');
 
   const initStringThrowable = RuntimeException.$init.overload('java.lang.String', 'java.lang.Throwable');
   initStringThrowable.implementation = function (message, cause) {
     const ret = initStringThrowable.call(this, message, cause);
-    if (message !== null && safeString(message).indexOf('DP: ') >= 0) {
-      log(`RuntimeException(String,Throwable) DP message=${safeString(message)} cause=${safeString(cause)}`);
-      log(`RuntimeException(String,Throwable) DP stack=${stackOf(this)}`);
-    }
+    logDpRuntimeException('RuntimeException(String,Throwable)', this, message, ` cause=${safeString(cause)}`);
     return ret;
   };
+  log('installed RuntimeException(String,Throwable) constructor hook');
 }
 
 function hookMessageGuardException() {
@@ -572,69 +581,196 @@ function hookNativeSystemProperties() {
     return;
   }
   installNativePropertyLateResolution();
+}
 
-function hookNativeSystemProperties() {
-  const candidates = [
-    ['libc.so', '__system_property_get']
+function hookNativeLibraryLoading() {
+  if (nativeLibraryHookInstalled) {
+    return;
+  }
+
+  const nativeCandidates = [
+    ['libdl.so', 'android_dlopen_ext'],
+    ['libdl.so', 'dlopen']
   ];
 
-  candidates.forEach(function (candidate) {
+  nativeCandidates.forEach(function (candidate) {
     const libraryName = candidate[0];
     const symbolName = candidate[1];
     try {
-      const address = Module.findExportByName(libraryName, symbolName);
-      if (address === null) {
-        log(`native property symbol unavailable ${libraryName}!${symbolName}`);
+      const address = findExportAddress(libraryName, symbolName);
+      if (address === null || address === undefined) {
+        log(`native library load symbol unavailable ${libraryName}!${symbolName}`);
         return;
       }
       Interceptor.attach(address, {
         onEnter(args) {
           this.symbolName = `${libraryName}!${symbolName}`;
-          this.key = '<unreadable>';
+          this.path = '<unreadable>';
           try {
-            this.key = args[0].readCString();
+            this.path = args[0].readCString();
           } catch (error) {
-            this.key = `<key read failed: ${error}>`;
+            this.path = `<path read failed: ${error}>`;
           }
-          this.valuePtr = args[1];
         },
         onLeave(retval) {
-          let value = '<unreadable>';
-          try {
-            if (this.symbolName.indexOf('__system_property_get') >= 0 && !this.valuePtr.isNull()) {
-              value = this.valuePtr.readCString();
-            } else {
-              value = `<retval=${safeString(retval)}>`;
-            }
-          } catch (error) {
-            value = `<value read failed: ${error}>`;
-          }
-          log(`NativeProperty ${this.symbolName} key=${this.key} => ${value} retval=${safeString(retval)}`);
+          log(`NativeLibrary ${this.symbolName} path=${this.path} retval=${safeString(retval)}`);
         }
       });
-      log(`installed native property hook ${libraryName}!${symbolName} @ ${address}`);
+      log(`installed native library load hook ${libraryName}!${symbolName} @ ${address}`);
+      nativeLibraryHookInstalled = true;
     } catch (error) {
-      log(`skipped native property hook ${libraryName}!${symbolName}: ${error}`);
+      log(`FAILED installing native library load hook ${libraryName}!${symbolName}: ${error}`);
     }
   });
-
 }
 
-setImmediate(function () {
-  log('probe loading');
-  hookNativeSystemProperties();
+function hookJavaLibraryLoading() {
+  const Runtime = Java.use('java.lang.Runtime');
 
-  Java.perform(function () {
-    javaReady = true;
-    startupPhase = 'java-perform';
+  installSafely('Runtime.load0(Class,String) hook', function () {
+    const load0 = Runtime.load0.overload('java.lang.Class', 'java.lang.String');
+    load0.implementation = function (fromClass, filename) {
+      log(`Runtime.load0 fromClass=${safeString(fromClass)} filename=${safeString(filename)}`);
+      return load0.call(this, fromClass, filename);
+    };
+  });
+
+  installSafely('Runtime.loadLibrary0(ClassLoader,Class,String) hook', function () {
+    const loadLibrary0 = Runtime.loadLibrary0.overload('java.lang.ClassLoader', 'java.lang.Class', 'java.lang.String');
+    loadLibrary0.implementation = function (loader, fromClass, libname) {
+      log(`Runtime.loadLibrary0 loader=${safeString(loader)} fromClass=${safeString(fromClass)} libname=${safeString(libname)}`);
+      return loadLibrary0.call(this, loader, fromClass, libname);
+    };
+  });
+}
+
+function tryInstallLateClassHooks(className, reason) {
+  if (pendingClassHookNames[className]) {
+    return;
+  }
+
+  if (className === `${PACKAGE_NAME}.MessageGuardException`) {
+    if (installSafely(`MessageGuardException logging (${reason})`, hookMessageGuardException)) {
+      pendingClassHookNames[className] = true;
+    }
+  } else if (className === `${PACKAGE_NAME}.ProtectedMyApplication` || className === `${PACKAGE_NAME}.ProtectedMyApplication$ProtectedMyApplication`) {
+    if (installSafely(`ProtectedMyApplication startup logging (${reason})`, hookProtectedApplication)) {
+      pendingClassHookNames[`${PACKAGE_NAME}.ProtectedMyApplication`] = true;
+      pendingClassHookNames[`${PACKAGE_NAME}.ProtectedMyApplication$ProtectedMyApplication`] = true;
+    }
+  }
+}
+
+function hookClassLoaderObservation() {
+  const ClassLoader = Java.use('java.lang.ClassLoader');
+  const interesting = [
+    `${PACKAGE_NAME}.ProtectedMyApplication`,
+    `${PACKAGE_NAME}.ProtectedMyApplication$ProtectedMyApplication`,
+    `${PACKAGE_NAME}.MessageGuardException`
+  ];
+
+  const loadClass = ClassLoader.loadClass.overload('java.lang.String', 'boolean');
+  loadClass.implementation = function (name, resolve) {
+    const klass = loadClass.call(this, name, resolve);
+    if (interesting.indexOf(safeString(name)) >= 0) {
+      log(`ClassLoader.loadClass observed name=${safeString(name)} resolve=${resolve} loader=${safeString(this)} result=${safeString(klass)}`);
+      tryInstallLateClassHooks(safeString(name), 'classloader-observed');
+    }
+    return klass;
+  };
+  log('installed ClassLoader.loadClass(String,boolean) observer');
+}
+
+function installJavaInstrumentation(reason) {
+  if (javaInstrumentationInstalled) {
+    log(`Java instrumentation already installed reason=${reason}`);
+    return;
+  }
+
+  javaReady = true;
+  const previousPhase = startupPhase;
+  startupPhase = 'java-perform';
+  log(`Java.perform begin reason=${reason}`);
+
+  try {
     Throwable = Java.use('java.lang.Throwable');
+    log('installed Throwable helper');
 
     installSafely('SystemProperties logging', hookSystemProperties);
     installSafely('Build reflection access logging', hookReflectionBuildAccess);
     installSafely('RuntimeException DP logging', hookRuntimeExceptions);
     installSafely('MessageGuardException logging', hookMessageGuardException);
     installSafely('ProtectedMyApplication startup logging', hookProtectedApplication);
+    installSafely('Java native library loading logging', hookJavaLibraryLoading);
+    installSafely('ClassLoader observation', hookClassLoaderObservation);
     logBuildSnapshot('initial-java-perform');
-    log(`probe ready javaReady=${javaReady}`);
-  });
+
+    javaInstrumentationInstalled = true;
+    log(`probe ready javaReady=${javaReady} javaInstrumentationInstalled=${javaInstrumentationInstalled}`);
+  } finally {
+    startupPhase = previousPhase;
+  }
+}
+
+function scheduleJavaInstrumentation() {
+  if (typeof Java === 'undefined') {
+    log('Java API unavailable in this Frida runtime; cannot schedule Java instrumentation');
+    return;
+  }
+
+  function attempt(reason) {
+    if (javaInstrumentationInstalled) {
+      return true;
+    }
+    let available = false;
+    try {
+      available = Java.available;
+    } catch (error) {
+      log(`Java availability check failed reason=${reason}: ${error}`);
+      return false;
+    }
+
+    log(`Java availability check reason=${reason} Java.available=${available}`);
+    if (!available) {
+      return false;
+    }
+
+    log(`Java became available reason=${reason}; scheduling Java.perform`);
+    Java.perform(function () {
+      installJavaInstrumentation(reason);
+    });
+    return true;
+  }
+
+  if (attempt('initial')) {
+    return;
+  }
+
+  if (javaRetryTimer === null && typeof setInterval === 'function') {
+    let attempts = 0;
+    javaRetryTimer = setInterval(function () {
+      attempts += 1;
+      if (javaInstrumentationInstalled) {
+        clearInterval(javaRetryTimer);
+        javaRetryTimer = null;
+        log(`Java retry loop stopped after successful install attempts=${attempts}`);
+        return;
+      }
+      if (attempts > 80) {
+        clearInterval(javaRetryTimer);
+        javaRetryTimer = null;
+        log('Java retry loop stopped; Java instrumentation not installed after 80 attempts');
+        return;
+      }
+      attempt(`retry-${attempts}`);
+    }, 50);
+    log('installed Java availability retry loop intervalMs=50 maxAttempts=80');
+  }
+}
+
+setImmediate(function () {
+  log('probe loading');
+  hookNativeSystemProperties();
+  hookNativeLibraryLoading();
+  scheduleJavaInstrumentation();
 });
