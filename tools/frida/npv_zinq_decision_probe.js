@@ -37,6 +37,14 @@ function elapsedMs() { return Date.now() - runStartedAt; }
 function threadName() {
   try { return JavaThread ? safe(JavaThread.currentThread().getName()) : '<java-unavailable>'; } catch (_) { return '<java-unavailable>'; }
 }
+function exceptionClassName(e) {
+  if (e === null || e === undefined) return '<null>';
+  try { return safe(e.getClass().getName()); } catch (_) { return '<class unavailable>'; }
+}
+function exceptionMessage(e) {
+  if (e === null || e === undefined) return '<null>';
+  try { return e.getMessage ? safe(e.getMessage()) : '<no getMessage>'; } catch (_) { return '<message unavailable>'; }
+}
 function log(msg) { seq += 1; console.log(`[${TAG} #${seq} ${now()} +${elapsedMs()}ms tid=${tid()} jthread=${threadName()} phase=${phase}] ${msg}`); }
 function safe(v) { try { return String(v); } catch (e) { return `<string failed: ${e}>`; } }
 function ptrSafe(p) { return p === null || p === undefined ? ptr('0') : p; }
@@ -75,7 +83,17 @@ function classifyLoaderOwner(fromClass, stackText) {
   if (haystack.indexOf(PKG) >= 0 || haystack.indexOf('napsternetlabs') >= 0) return 'NPV code';
   if (/com\.google\.|com\.android\.webview|com\.google\.android\.gms|com\.google\.android\.libraries/.test(haystack)) return 'Google component';
   if (/android\.|java\.|dalvik\.|libcore\.|com\.android\./.test(haystack)) return 'Android framework code';
-  return 'another library/unknown';
+  return 'another dependency/unknown';
+}
+function inferSystemLoadLibraryFromClass() {
+  try {
+    const VMStack = Java.use('dalvik.system.VMStack');
+    if (VMStack.getStackClass2) return safe(VMStack.getStackClass2());
+  } catch (_) {}
+  return '<unavailable: System.loadLibrary has no fromClass parameter>';
+}
+function logFrameworkConnectivityEvent(apiName, eventName, libname, fromClass, stackText, extra) {
+  log(`FRAMEWORK_CONNECTIVITY_JNI ${apiName} ${eventName} lib=${safe(libname)} fromClass=${safe(fromClass)} thread=${threadName()} owner=${classifyLoaderOwner(fromClass, stackText)} ${lifecycleSnapshot()}${extra ? ` ${extra}` : ''}\nJava stack ${eventName} ${apiName}(${safe(libname)})\n${stackText}`);
 }
 function logLibraryLoadObservation(apiName, libname, fromClass, extra) {
   const stackText = javaStack();
@@ -247,14 +265,26 @@ Java.perform(function () {
   systemLoadLibrary.implementation = function (lib) {
     const old = phase;
     const libString = safe(lib);
+    const isFrameworkConnectivity = libString === 'framework-connectivity-jni';
+    const fromClass = isFrameworkConnectivity ? inferSystemLoadLibraryFromClass() : '<System.loadLibrary caller in Java stack>';
     if (libString === 'dpboot') phase = 'loadLibrary-dpboot';
-    logLibraryLoadObservation('System.loadLibrary', lib, '<System.loadLibrary caller in Java stack>', `targetFrameworkConnectivity=${libString === 'framework-connectivity-jni'}`);
+    const beforeStack = javaStack();
+    if (isFrameworkConnectivity) {
+      logFrameworkConnectivityEvent('System.loadLibrary', 'BEFORE_ORIGINAL', lib, fromClass, beforeStack);
+    } else {
+      logLibraryLoadObservation('System.loadLibrary', lib, fromClass, `targetFrameworkConnectivity=${isFrameworkConnectivity}`);
+    }
     try {
       const r = systemLoadLibrary.call(this, lib);
       log(`System.loadLibrary return lib=${libString} result=${safe(r)} ${lifecycleSnapshot()}`);
       return r;
     } catch (e) {
-      log(`System.loadLibrary THROW lib=${libString} exception=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'} ${lifecycleSnapshot()}`);
+      const afterThrowStack = javaStack();
+      if (isFrameworkConnectivity) {
+        logFrameworkConnectivityEvent('System.loadLibrary', 'AFTER_THROW', lib, fromClass, afterThrowStack, `exceptionClass=${exceptionClassName(e)} exceptionMessage=${exceptionMessage(e)} exception=${safe(e)}`);
+      } else {
+        log(`System.loadLibrary THROW lib=${libString} exception=${safe(e)} message=${exceptionMessage(e)} ${lifecycleSnapshot()}`);
+      }
       throw e;
     } finally {
       if (libString === 'dpboot') logLoadedModules('after-loadLibrary-dpboot');
@@ -266,13 +296,25 @@ Java.perform(function () {
   try {
     const runtimeLoadLibrary0 = Runtime.loadLibrary0.overload('java.lang.ClassLoader', 'java.lang.Class', 'java.lang.String');
     runtimeLoadLibrary0.implementation = function (loader, fromClass, libname) {
-      logLibraryLoadObservation('Runtime.loadLibrary0', libname, fromClass, `loader=${safe(loader)} targetFrameworkConnectivity=${safe(libname) === 'framework-connectivity-jni'}`);
+      const libString = safe(libname);
+      const isFrameworkConnectivity = libString === 'framework-connectivity-jni';
+      const beforeStack = javaStack();
+      if (isFrameworkConnectivity) {
+        logFrameworkConnectivityEvent('Runtime.loadLibrary0', 'BEFORE_ORIGINAL', libname, fromClass, beforeStack, `loader=${safe(loader)}`);
+      } else {
+        logLibraryLoadObservation('Runtime.loadLibrary0', libname, fromClass, `loader=${safe(loader)} targetFrameworkConnectivity=${isFrameworkConnectivity}`);
+      }
       try {
         const r = runtimeLoadLibrary0.call(this, loader, fromClass, libname);
         log(`Runtime.loadLibrary0 return lib=${safe(libname)} fromClass=${safe(fromClass)} result=${safe(r)} ${lifecycleSnapshot()}`);
         return r;
       } catch (e) {
-        log(`Runtime.loadLibrary0 THROW lib=${safe(libname)} fromClass=${safe(fromClass)} exception=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'} ${lifecycleSnapshot()}`);
+        const afterThrowStack = javaStack();
+        if (isFrameworkConnectivity) {
+          logFrameworkConnectivityEvent('Runtime.loadLibrary0', 'AFTER_THROW', libname, fromClass, afterThrowStack, `loader=${safe(loader)} exceptionClass=${exceptionClassName(e)} exceptionMessage=${exceptionMessage(e)} exception=${safe(e)}`);
+        } else {
+          log(`Runtime.loadLibrary0 THROW lib=${safe(libname)} fromClass=${safe(fromClass)} exception=${safe(e)} message=${exceptionMessage(e)} ${lifecycleSnapshot()}`);
+        }
         throw e;
       }
     };
