@@ -224,10 +224,32 @@ Java.perform(function () {
   SystemProperties.get.overload('java.lang.String').implementation = function (k) { const r = this.get(k); if (zinqWindow || /^ro\.|^persist\.|^vendor\./.test(safe(k))) log(`SystemProperties.get ${k} => ${r}\n${javaStack()}`); return r; };
   SystemProperties.get.overload('java.lang.String', 'java.lang.String').implementation = function (k, d) { const r = this.get(k, d); if (zinqWindow || /^ro\.|^persist\.|^vendor\./.test(safe(k))) log(`SystemProperties.getDefault ${k} default=${d} => ${r}\n${javaStack()}`); return r; };
 
+  const System = Java.use('java.lang.System');
+  const systemLoadLibrary = System.loadLibrary.overload('java.lang.String');
+  systemLoadLibrary.implementation = function (lib) {
+    const old = phase;
+    if (safe(lib) === 'dpboot') phase = 'loadLibrary-dpboot';
+    log(`System.loadLibrary enter lib=${safe(lib)}`);
+    try {
+      const r = systemLoadLibrary.call(this, lib);
+      log(`System.loadLibrary return lib=${safe(lib)} result=${safe(r)}`);
+      return r;
+    } catch (e) {
+      log(`System.loadLibrary THROW lib=${safe(lib)} exception=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`);
+      throw e;
+    } finally {
+      if (safe(lib) === 'dpboot') logLoadedModules('after-loadLibrary-dpboot');
+      phase = old;
+    }
+  };
+
   const Runtime = Java.use('java.lang.Runtime');
   Runtime.exec.overloads.forEach(ov => { ov.implementation = function () { log(`Runtime.exec argc=${arguments.length} args=${Array.prototype.map.call(arguments, safe).join(' | ')}\n${javaStack()}`); return ov.apply(this, arguments); }; });
 
   const PMAClass = Java.use(PMA);
+  const certificateJ = PMAClass.J.overload();
+  certificateJ.implementation = function () { const old = phase; phase = 'certificate-J'; log('J enter'); try { const r = certificateJ.call(this); log(`J return normally result=${safe(r)}`); return r; } catch (e) { log(`J THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { phase = old; } };
+
   PMAClass.attachBaseContext.overload('android.content.Context').implementation = function (ctx) { const old = phase; phase = 'attachBaseContext'; log('attachBaseContext enter'); buildSnapshot('attachBaseContext-enter'); logLoadedModules('attachBaseContext-enter'); try { const r = this.attachBaseContext(ctx); log('attachBaseContext return normally'); return r; } catch (e) { log(`attachBaseContext THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { log('attachBaseContext exit/finally'); logLoadedModules('attachBaseContext-exit'); phase = old; } };
   PMAClass.onCreate.overload().implementation = function () { const old = phase; phase = 'onCreate'; log('onCreate enter'); buildSnapshot('onCreate-enter'); try { const r = this.onCreate(); log('onCreate return normally'); return r; } catch (e) { log(`onCreate THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { log('onCreate exit/finally'); logLoadedModules('onCreate-exit'); phase = old; } };
 
