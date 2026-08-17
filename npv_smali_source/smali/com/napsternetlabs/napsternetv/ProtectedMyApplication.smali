@@ -1605,6 +1605,12 @@
     fill-array-data v0, :array_1
 
     :try_start_0
+    const-string v2, "NPVDevStartup"
+
+    const-string v5, "ProtectedMyApplication.onCreate zInq boundary entry"
+
+    invoke-static {v2, v5}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
     invoke-static {}, Lcom/napsternetlabs/napsternetv/ProtectedMyApplication;->gwj()[B
 
     move-result-object v2
@@ -1635,7 +1641,19 @@
     goto :goto_0
 
     :cond_0
+    const-string v2, "NPVDevStartup"
+
+    const-string v5, "calling native zInq with derived startup material"
+
+    invoke-static {v2, v5}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
     invoke-static {v4}, Lcom/napsternetlabs/napsternetv/ProtectedMyApplication;->zInq(Ljava/lang/Object;)V
+
+    const-string v2, "NPVDevStartup"
+
+    const-string v5, "native zInq completed without Java exception"
+
+    invoke-static {v2, v5}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
     :try_end_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
@@ -1644,9 +1662,60 @@
     :catchall_0
     move-exception v2
 
+    const-string v5, "NPVDevStartup"
+
+    const-string v6, "zInq startup exception generated"
+
+    invoke-static {v5, v6, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+
+    invoke-virtual {p0}, Lcom/napsternetlabs/napsternetv/ProtectedMyApplication;->getApplicationInfo()Landroid/content/pm/ApplicationInfo;
+
+    move-result-object v5
+
+    iget v5, v5, Landroid/content/pm/ApplicationInfo;->flags:I
+
+    and-int/lit8 v5, v5, 0x2
+
+    if-eqz v5, :cond_2
+
+    invoke-virtual {v2}, Ljava/lang/Throwable;->getMessage()Ljava/lang/String;
+
+    move-result-object v5
+
+    if-eqz v5, :cond_2
+
+    const-string v6, "DP: 786"
+
+    invoke-virtual {v5, v6}, Ljava/lang/String;->contains(Ljava/lang/CharSequence;)Z
+
+    move-result v5
+
+    if-eqz v5, :cond_2
+
+    const-string v5, "NPVDevStartup"
+
+    const-string v6, "debuggable development build: continuing after zInq DP:786; release builds still delegate to guard wrapper"
+
+    invoke-static {v5, v6}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    goto :goto_1
+
+    :cond_2
+    const-string v5, "NPVDevStartup"
+
+    const-string v6, "development continuation inactive; delegating startup exception to original guard wrapper"
+
+    invoke-static {v5, v6}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
     invoke-static {p0, v2}, Lcom/napsternetlabs/napsternetv/ProtectedMyApplication$ProtectedMyApplication;->j(Landroid/content/Context;Ljava/lang/Throwable;)V
 
     :goto_1
+    const-string v2, "NPVDevStartup"
+
+    const-string v5, "ProtectedMyApplication.onCreate returning to Android runtime"
+
+    invoke-static {v2, v5}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
     return-void
 
     nop
