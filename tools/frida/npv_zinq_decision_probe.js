@@ -63,6 +63,12 @@ function nativeBacktrace(ctx) {
 function javaStack() {
   try { return Java.use('android.util.Log').getStackTraceString(Throwable.$new()); } catch (e) { return `<java stack failed: ${e}>`; }
 }
+function logMgeFingerprint(label) {
+  try {
+    const MGE = Java.use(`${PKG}.MessageGuardException`);
+    log(`MessageGuardException.fingerprint ${label}=${safe(MGE.fingerprint.value)}`);
+  } catch (e) { log(`MessageGuardException.fingerprint ${label} unavailable: ${e}`); }
+}
 function bytesHex(u8, max) {
   const n = Math.min(u8.length, max || MAX_PREVIEW);
   const out = [];
@@ -229,18 +235,30 @@ Java.perform(function () {
     PMAClass[name].overloads.forEach(ov => { ov.implementation = function () {
       const old = phase; phase = `java-native-${name}`; const was = zinqWindow; if (name === 'zInq') zinqWindow = true;
       log(`${name} enter argc=${arguments.length} nativeMapping=${nativeMethods[name] ? JSON.stringify(nativeMethods[name]) : '<unknown>'}`);
+      if (name === 'zInq') logMgeFingerprint('before-zInq');
       if (name === 'zInq' && arguments.length > 0) { try { log(`zInq arg0 ${inspectZinqObject(arguments[0])}`); } catch (e) { log(`zInq arg0 inspect failed: ${e} value=${safe(arguments[0])}`); } }
       log(`java stack at ${name} entry\n${javaStack()}`);
-      try { const r = ov.apply(this, arguments); log(`${name} return=${safe(r)}`); return r; }
-      catch (e) { log(`${name} THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; }
+      try { const r = ov.apply(this, arguments); log(`${name} return=${safe(r)}`); if (name === 'zInq') logMgeFingerprint('after-zInq-return'); return r; }
+      catch (e) { log(`${name} THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); if (name === 'zInq') logMgeFingerprint('after-zInq-throw'); throw e; }
       finally { if (name === 'zInq') zinqWindow = was; phase = old; }
     }; });
   });
 
   const RuntimeException = Java.use('java.lang.RuntimeException');
-  RuntimeException.$init.overload('java.lang.String').implementation = function (s) { const r = this.$init(s); if (safe(s).indexOf('DP:') >= 0) log(`RuntimeException DP message=${s}\n${javaStack()}`); return r; };
+  RuntimeException.$init.overload('java.lang.String').implementation = function (s) { const r = this.$init(s); if (safe(s).indexOf('DP:') >= 0) log(`RuntimeException(String) DP message=${s}\n${javaStack()}`); return r; };
+  RuntimeException.$init.overload('java.lang.String', 'java.lang.Throwable').implementation = function (s, t) { const r = this.$init(s, t); if (safe(s).indexOf('DP:') >= 0 || safe(t).indexOf('DP:') >= 0) log(`RuntimeException(String,Throwable) message=${s} cause=${safe(t)} causeMessage=${t ? safe(t.getMessage()) : 'null'}\n${javaStack()}`); return r; };
   const MGE = Java.use(`${PKG}.MessageGuardException`);
-  MGE.$init.overload('java.lang.Throwable', 'java.lang.String').implementation = function (t, id) { log(`MessageGuardException cause=${safe(t)} causeMessage=${t ? safe(t.getMessage()) : 'null'} id=${safe(id)}`); return this.$init(t, id); };
+  MGE.$init.overload('java.lang.Throwable', 'java.lang.String').implementation = function (t, id) { logMgeFingerprint('before-MGE-init'); log(`MessageGuardException cause=${safe(t)} causeMessage=${t ? safe(t.getMessage()) : 'null'} id=${safe(id)}`); const r = this.$init(t, id); logMgeFingerprint('after-MGE-init'); return r; };
+  try {
+    const Log = Java.use('android.util.Log');
+    ['d', 'i', 'w', 'e'].forEach(level => {
+      Log[level].overload('java.lang.String', 'java.lang.String').implementation = function (tag, msg) {
+        const text = `${safe(tag)} ${safe(msg)}`;
+        if (text.indexOf('Fingerprint:') >= 0 || text.indexOf('blocked') >= 0 || text.indexOf('DP:') >= 0) log(`Log.${level} tag=${safe(tag)} msg=${safe(msg)}\n${javaStack()}`);
+        return this[level](tag, msg);
+      };
+    });
+  } catch (e) { log(`android.util.Log hook failed: ${e}`); }
 
   log(`npv zInq decision probe installed (read-only) runStartedAt=${new Date(runStartedAt).toISOString()}`);
 });
