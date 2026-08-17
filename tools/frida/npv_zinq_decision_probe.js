@@ -20,6 +20,10 @@ const MAX_PREVIEW = 256;
 let seq = 0;
 let phase = 'pre-java';
 let zinqWindow = false;
+let attachBaseContextEntered = false;
+let attachBaseContextReturned = false;
+let onCreateEntered = false;
+let onCreateReturned = false;
 let Throwable = null;
 let JavaThread = null;
 const fdPaths = {};
@@ -62,6 +66,20 @@ function nativeBacktrace(ctx) {
 }
 function javaStack() {
   try { return Java.use('android.util.Log').getStackTraceString(Throwable.$new()); } catch (e) { return `<java stack failed: ${e}>`; }
+}
+function lifecycleSnapshot() {
+  return `beforeAttachBaseContext=${!attachBaseContextEntered} attachBaseContextEntered=${attachBaseContextEntered} attachBaseContextReturned=${attachBaseContextReturned} beforeOnCreate=${!onCreateEntered} onCreateEntered=${onCreateEntered} onCreateReturned=${onCreateReturned}`;
+}
+function classifyLoaderOwner(fromClass, stackText) {
+  const haystack = `${safe(fromClass)}\n${safe(stackText)}`;
+  if (haystack.indexOf(PKG) >= 0 || haystack.indexOf('napsternetlabs') >= 0) return 'NPV code';
+  if (/com\.google\.|com\.android\.webview|com\.google\.android\.gms|com\.google\.android\.libraries/.test(haystack)) return 'Google component';
+  if (/android\.|java\.|dalvik\.|libcore\.|com\.android\./.test(haystack)) return 'Android framework code';
+  return 'another library/unknown';
+}
+function logLibraryLoadObservation(apiName, libname, fromClass, extra) {
+  const stackText = javaStack();
+  log(`${apiName} loadLibrary argument=${safe(libname)} fromClass=${safe(fromClass)} owner=${classifyLoaderOwner(fromClass, stackText)} ${lifecycleSnapshot()}${extra ? ` ${extra}` : ''}\nJava stack at ${apiName}(${safe(libname)})\n${stackText}`);
 }
 function logMgeFingerprint(label) {
   try {
@@ -228,30 +246,45 @@ Java.perform(function () {
   const systemLoadLibrary = System.loadLibrary.overload('java.lang.String');
   systemLoadLibrary.implementation = function (lib) {
     const old = phase;
-    if (safe(lib) === 'dpboot') phase = 'loadLibrary-dpboot';
-    log(`System.loadLibrary enter lib=${safe(lib)}`);
+    const libString = safe(lib);
+    if (libString === 'dpboot') phase = 'loadLibrary-dpboot';
+    logLibraryLoadObservation('System.loadLibrary', lib, '<System.loadLibrary caller in Java stack>', `targetFrameworkConnectivity=${libString === 'framework-connectivity-jni'}`);
     try {
       const r = systemLoadLibrary.call(this, lib);
-      log(`System.loadLibrary return lib=${safe(lib)} result=${safe(r)}`);
+      log(`System.loadLibrary return lib=${libString} result=${safe(r)} ${lifecycleSnapshot()}`);
       return r;
     } catch (e) {
-      log(`System.loadLibrary THROW lib=${safe(lib)} exception=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`);
+      log(`System.loadLibrary THROW lib=${libString} exception=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'} ${lifecycleSnapshot()}`);
       throw e;
     } finally {
-      if (safe(lib) === 'dpboot') logLoadedModules('after-loadLibrary-dpboot');
+      if (libString === 'dpboot') logLoadedModules('after-loadLibrary-dpboot');
       phase = old;
     }
   };
 
   const Runtime = Java.use('java.lang.Runtime');
+  try {
+    const runtimeLoadLibrary0 = Runtime.loadLibrary0.overload('java.lang.ClassLoader', 'java.lang.Class', 'java.lang.String');
+    runtimeLoadLibrary0.implementation = function (loader, fromClass, libname) {
+      logLibraryLoadObservation('Runtime.loadLibrary0', libname, fromClass, `loader=${safe(loader)} targetFrameworkConnectivity=${safe(libname) === 'framework-connectivity-jni'}`);
+      try {
+        const r = runtimeLoadLibrary0.call(this, loader, fromClass, libname);
+        log(`Runtime.loadLibrary0 return lib=${safe(libname)} fromClass=${safe(fromClass)} result=${safe(r)} ${lifecycleSnapshot()}`);
+        return r;
+      } catch (e) {
+        log(`Runtime.loadLibrary0 THROW lib=${safe(libname)} fromClass=${safe(fromClass)} exception=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'} ${lifecycleSnapshot()}`);
+        throw e;
+      }
+    };
+  } catch (e) { log(`Runtime.loadLibrary0(ClassLoader,Class,String) hook unavailable: ${e}`); }
   Runtime.exec.overloads.forEach(ov => { ov.implementation = function () { log(`Runtime.exec argc=${arguments.length} args=${Array.prototype.map.call(arguments, safe).join(' | ')}\n${javaStack()}`); return ov.apply(this, arguments); }; });
 
   const PMAClass = Java.use(PMA);
   const certificateJ = PMAClass.J.overload();
   certificateJ.implementation = function () { const old = phase; phase = 'certificate-J'; log('J enter'); try { const r = certificateJ.call(this); log(`J return normally result=${safe(r)}`); return r; } catch (e) { log(`J THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { phase = old; } };
 
-  PMAClass.attachBaseContext.overload('android.content.Context').implementation = function (ctx) { const old = phase; phase = 'attachBaseContext'; log('attachBaseContext enter'); buildSnapshot('attachBaseContext-enter'); logLoadedModules('attachBaseContext-enter'); try { const r = this.attachBaseContext(ctx); log('attachBaseContext return normally'); return r; } catch (e) { log(`attachBaseContext THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { log('attachBaseContext exit/finally'); logLoadedModules('attachBaseContext-exit'); phase = old; } };
-  PMAClass.onCreate.overload().implementation = function () { const old = phase; phase = 'onCreate'; log('onCreate enter'); buildSnapshot('onCreate-enter'); try { const r = this.onCreate(); log('onCreate return normally'); return r; } catch (e) { log(`onCreate THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { log('onCreate exit/finally'); logLoadedModules('onCreate-exit'); phase = old; } };
+  PMAClass.attachBaseContext.overload('android.content.Context').implementation = function (ctx) { const old = phase; phase = 'attachBaseContext'; attachBaseContextEntered = true; log('attachBaseContext enter'); buildSnapshot('attachBaseContext-enter'); logLoadedModules('attachBaseContext-enter'); try { const r = this.attachBaseContext(ctx); attachBaseContextReturned = true; log('attachBaseContext return normally'); return r; } catch (e) { log(`attachBaseContext THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { log('attachBaseContext exit/finally'); logLoadedModules('attachBaseContext-exit'); phase = old; } };
+  PMAClass.onCreate.overload().implementation = function () { const old = phase; phase = 'onCreate'; onCreateEntered = true; log('onCreate enter'); buildSnapshot('onCreate-enter'); try { const r = this.onCreate(); onCreateReturned = true; log('onCreate return normally'); return r; } catch (e) { log(`onCreate THROW=${safe(e)} message=${e && e.getMessage ? safe(e.getMessage()) : '<no getMessage>'}`); throw e; } finally { log('onCreate exit/finally'); logLoadedModules('onCreate-exit'); phase = old; } };
 
   ['uapgpA', 'gwj', 'zInq'].forEach(name => {
     PMAClass[name].overloads.forEach(ov => { ov.implementation = function () {
