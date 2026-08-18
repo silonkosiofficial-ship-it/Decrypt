@@ -63,6 +63,12 @@ let Throwable = null;
 let javaInstrumentationInstalled = false;
 let javaRetryTimer = null;
 let nativeLibraryHookInstalled = false;
+const recentClassLoads = [];
+const RECENT_CLASS_LOAD_LIMIT = 24;
+const EARLY_STARTUP_CLASS_TARGETS = [
+  'android.net.NetworkUtils',
+  'android.net.ConnectivityManager'
+];
 const lifecycleState = {
   attachBaseContextEntered: false,
   attachBaseContextReturned: false,
@@ -1132,6 +1138,36 @@ function logJavaBoundaryEvent(methodName, eventName, detail, stackText) {
   log(`${methodName} ${eventName} timestamp=${now()} elapsedMs=${elapsedMs()} thread=${currentJavaThreadName()} pid=${currentPid()} ${currentProcessPackageName()} lifecycle=${formatLifecycleState()}${detail ? ` ${detail}` : ''}\nJava stack ${methodName} ${eventName}\n${stackText || currentJavaStack()}`);
 }
 
+function rememberClassLoad(boundary, eventName, className, loader, resolve) {
+  recentClassLoads.push({
+    timestamp: now(),
+    elapsedMs: elapsedMs(),
+    thread: currentJavaThreadName(),
+    lifecycle: formatLifecycleState(),
+    boundary: boundary,
+    eventName: eventName,
+    className: safeString(className),
+    loader: safeString(loader),
+    resolve: resolve === undefined ? '<not-applicable>' : safeString(resolve)
+  });
+  while (recentClassLoads.length > RECENT_CLASS_LOAD_LIMIT) {
+    recentClassLoads.shift();
+  }
+}
+
+function recentClassLoadSummary() {
+  if (recentClassLoads.length === 0) {
+    return '<none observed by Java ClassLoader hooks>';
+  }
+  return recentClassLoads.map(function (entry, index) {
+    return `${index}:${entry.timestamp}/elapsedMs=${entry.elapsedMs}/thread=${entry.thread}/lifecycle=${entry.lifecycle}/boundary=${entry.boundary}/event=${entry.eventName}/class=${entry.className}/loader=${entry.loader}/resolve=${entry.resolve}`;
+  }).join(' | ');
+}
+
+function isEarlyStartupClassTarget(className) {
+  return EARLY_STARTUP_CLASS_TARGETS.indexOf(safeString(className)) >= 0;
+}
+
 function describeJavaException(error) {
   let exceptionClass = '<exception class unavailable>';
   let exceptionMessage = '<exception message unavailable>';
@@ -1235,6 +1271,29 @@ function hookJavaUncaughtExceptions() {
 function hookJavaLibraryLoading() {
   const Runtime = Java.use('java.lang.Runtime');
 
+  installSafely('System.loadLibrary(String) hook', function () {
+    const SystemClass = Java.use('java.lang.System');
+    const loadLibrary = SystemClass.loadLibrary.overload('java.lang.String');
+    loadLibrary.implementation = function (libname) {
+      const isFrameworkConnectivity = safeString(libname) === 'framework-connectivity-jni';
+      if (isFrameworkConnectivity) {
+        logJavaBoundaryEvent('java.lang.System.loadLibrary(String)', 'enter', `methodEntry=true className=java.lang.System libname=${safeString(libname)} recentClassLoads=${recentClassLoadSummary()}`, currentJavaStack());
+      }
+      try {
+        const result = loadLibrary.call(this, libname);
+        if (isFrameworkConnectivity) {
+          logJavaBoundaryEvent('java.lang.System.loadLibrary(String)', 'return', `className=java.lang.System libname=${safeString(libname)} returnValue=${safeString(result)} recentClassLoads=${recentClassLoadSummary()}`, currentJavaStack());
+        }
+        return result;
+      } catch (error) {
+        if (isFrameworkConnectivity) {
+          logJavaBoundaryEvent('java.lang.System.loadLibrary(String)', 'THROW', `className=java.lang.System libname=${safeString(libname)} thrownException=${describeJavaException(error)} recentClassLoads=${recentClassLoadSummary()}`, currentJavaStack());
+        }
+        throw error;
+      }
+    };
+  });
+
   installSafely('Runtime.load0(Class,String) hook', function () {
     const load0 = Runtime.load0.overload('java.lang.Class', 'java.lang.String');
     load0.implementation = function (fromClass, filename) {
@@ -1248,19 +1307,19 @@ function hookJavaLibraryLoading() {
     loadLibrary0.implementation = function (loader, fromClass, libname) {
       const isFrameworkConnectivity = safeString(libname) === 'framework-connectivity-jni';
       if (isFrameworkConnectivity) {
-        logJavaBoundaryEvent('Runtime.loadLibrary0(ClassLoader,Class,String)', 'enter', `methodEntry=true loader=${safeString(loader)} fromClass=${safeString(fromClass)} libname=${safeString(libname)}`, currentJavaStack());
+        logJavaBoundaryEvent('Runtime.loadLibrary0(ClassLoader,Class,String)', 'enter', `methodEntry=true className=java.lang.Runtime loader=${safeString(loader)} fromClass=${safeString(fromClass)} libname=${safeString(libname)} recentClassLoads=${recentClassLoadSummary()}`, currentJavaStack());
       } else {
         log(`Runtime.loadLibrary0 loader=${safeString(loader)} fromClass=${safeString(fromClass)} libname=${safeString(libname)}`);
       }
       try {
         const result = loadLibrary0.call(this, loader, fromClass, libname);
         if (isFrameworkConnectivity) {
-          logJavaBoundaryEvent('Runtime.loadLibrary0(ClassLoader,Class,String)', 'return', `loader=${safeString(loader)} fromClass=${safeString(fromClass)} libname=${safeString(libname)} returnValue=${safeString(result)}`, currentJavaStack());
+          logJavaBoundaryEvent('Runtime.loadLibrary0(ClassLoader,Class,String)', 'return', `className=java.lang.Runtime loader=${safeString(loader)} fromClass=${safeString(fromClass)} libname=${safeString(libname)} returnValue=${safeString(result)} recentClassLoads=${recentClassLoadSummary()}`, currentJavaStack());
         }
         return result;
       } catch (error) {
         if (isFrameworkConnectivity) {
-          logJavaBoundaryEvent('Runtime.loadLibrary0(ClassLoader,Class,String)', 'THROW', `loader=${safeString(loader)} fromClass=${safeString(fromClass)} libname=${safeString(libname)} thrownException=${describeJavaException(error)}`, currentJavaStack());
+          logJavaBoundaryEvent('Runtime.loadLibrary0(ClassLoader,Class,String)', 'THROW', `className=java.lang.Runtime loader=${safeString(loader)} fromClass=${safeString(fromClass)} libname=${safeString(libname)} thrownException=${describeJavaException(error)} recentClassLoads=${recentClassLoadSummary()}`, currentJavaStack());
         }
         throw error;
       }
@@ -1288,20 +1347,50 @@ function tryInstallLateClassHooks(className, reason) {
 function hookClassLoaderObservation() {
   const ClassLoader = Java.use('java.lang.ClassLoader');
   const networkUtilsName = 'android.net.NetworkUtils';
+  const connectivityManagerName = 'android.net.ConnectivityManager';
   const interesting = [
     `${PACKAGE_NAME}.ProtectedMyApplication`,
     `${PACKAGE_NAME}.ProtectedMyApplication$ProtectedMyApplication`,
     `${PACKAGE_NAME}.MessageGuardException`,
-    networkUtilsName
+    networkUtilsName,
+    connectivityManagerName
   ];
+
+  const loadClassString = ClassLoader.loadClass.overload('java.lang.String');
+  loadClassString.implementation = function (name) {
+    const className = safeString(name);
+    const isInteresting = interesting.indexOf(className) >= 0;
+    const isStartupTarget = isEarlyStartupClassTarget(className);
+    const stackText = isInteresting ? currentJavaStack() : null;
+    rememberClassLoad('ClassLoader.loadClass(String)', 'enter', className, this);
+    if (isStartupTarget) {
+      logJavaBoundaryEvent('ClassLoader.loadClass(String)', 'enter', `methodEntry=true className=${className} loader=${safeString(this)} staticInitDetection=class-load-request`, stackText);
+    }
+    try {
+      const klass = loadClassString.call(this, name);
+      if (isInteresting) {
+        rememberClassLoad('ClassLoader.loadClass(String)', 'return', className, this);
+        logJavaBoundaryEvent('ClassLoader.loadClass(String)', 'return', `className=${className} loader=${safeString(this)} returnValue=${safeString(klass)} staticInitDetection=class-load-return`, currentJavaStack());
+        tryInstallLateClassHooks(className, 'classloader-string-observed');
+      }
+      return klass;
+    } catch (error) {
+      if (isInteresting) {
+        rememberClassLoad('ClassLoader.loadClass(String)', 'THROW', className, this);
+        logJavaBoundaryEvent('ClassLoader.loadClass(String)', 'THROW', `className=${className} loader=${safeString(this)} thrownException=${describeJavaException(error)} staticInitDetection=class-load-throw`, currentJavaStack());
+      }
+      throw error;
+    }
+  };
 
   const loadClass = ClassLoader.loadClass.overload('java.lang.String', 'boolean');
   loadClass.implementation = function (name, resolve) {
     const className = safeString(name);
     const isInteresting = interesting.indexOf(className) >= 0;
     const stackText = isInteresting ? currentJavaStack() : null;
-    if (className === networkUtilsName) {
-      logJavaBoundaryEvent('ClassLoader.loadClass(String,boolean)', 'enter', `methodEntry=true target=${className} resolve=${resolve} loader=${safeString(this)} staticInitDetection=class-load-request`, stackText);
+    rememberClassLoad('ClassLoader.loadClass(String,boolean)', 'enter', className, this, resolve);
+    if (isEarlyStartupClassTarget(className)) {
+      logJavaBoundaryEvent('ClassLoader.loadClass(String,boolean)', 'enter', `methodEntry=true className=${className} resolve=${resolve} loader=${safeString(this)} staticInitDetection=class-load-request`, stackText);
     }
     try {
       const klass = loadClass.call(this, name, resolve);
@@ -1309,18 +1398,24 @@ function hookClassLoaderObservation() {
         log(`ClassLoader.loadClass observed name=${className} resolve=${resolve} loader=${safeString(this)} result=${safeString(klass)}`);
         tryInstallLateClassHooks(className, 'classloader-observed');
       }
-      if (className === networkUtilsName) {
-        logJavaBoundaryEvent('ClassLoader.loadClass(String,boolean)', 'return', `target=${className} resolve=${resolve} loader=${safeString(this)} returnValue=${safeString(klass)} staticInitDetection=class-load-return`, currentJavaStack());
+      if (isInteresting) {
+        rememberClassLoad('ClassLoader.loadClass(String,boolean)', 'return', className, this, resolve);
+      }
+      if (isEarlyStartupClassTarget(className)) {
+        logJavaBoundaryEvent('ClassLoader.loadClass(String,boolean)', 'return', `className=${className} resolve=${resolve} loader=${safeString(this)} returnValue=${safeString(klass)} staticInitDetection=class-load-return`, currentJavaStack());
       }
       return klass;
     } catch (error) {
-      if (className === networkUtilsName) {
-        logJavaBoundaryEvent('ClassLoader.loadClass(String,boolean)', 'THROW', `target=${className} resolve=${resolve} loader=${safeString(this)} thrownException=${describeJavaException(error)} staticInitDetection=class-load-throw`, currentJavaStack());
+      if (isInteresting) {
+        rememberClassLoad('ClassLoader.loadClass(String,boolean)', 'THROW', className, this, resolve);
+      }
+      if (isEarlyStartupClassTarget(className)) {
+        logJavaBoundaryEvent('ClassLoader.loadClass(String,boolean)', 'THROW', `className=${className} resolve=${resolve} loader=${safeString(this)} thrownException=${describeJavaException(error)} staticInitDetection=class-load-throw`, currentJavaStack());
       }
       throw error;
     }
   };
-  log('installed ClassLoader.loadClass(String,boolean) observer');
+  log('installed ClassLoader.loadClass(String) and ClassLoader.loadClass(String,boolean) observers');
 }
 
 function installJavaInstrumentation(reason) {
@@ -1338,17 +1433,18 @@ function installJavaInstrumentation(reason) {
     Throwable = Java.use('java.lang.Throwable');
     log('installed Throwable helper');
 
+    installSafely('Earliest Java native library loading logging', hookJavaLibraryLoading);
+    installSafely('Earliest ClassLoader observation', hookClassLoaderObservation);
+
     installSafely('SystemProperties logging', hookSystemProperties);
     installSafely('Build reflection access logging', hookReflectionBuildAccess);
     installSafely('RuntimeException DP logging', hookRuntimeExceptions);
     installSafely('MessageGuardException logging', hookMessageGuardException);
     installSafely('ProtectedMyApplication startup logging', hookProtectedApplication);
-    installSafely('Java native library loading logging', hookJavaLibraryLoading);
     installSafely('NetworkUtils static initialization detection', hookNetworkUtilsStaticInitializationDetection);
     installSafely('ConnectivityManager.getDefaultProxy logging', hookConnectivityManagerGetDefaultProxy);
     installSafely('ConnectivityManager network boundary logging', hookConnectivityNetworkBoundaryMethods);
     installSafely('Java uncaught exception logging', hookJavaUncaughtExceptions);
-    installSafely('ClassLoader observation', hookClassLoaderObservation);
     logBuildSnapshot('initial-java-perform');
 
     javaInstrumentationInstalled = true;
