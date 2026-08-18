@@ -58,19 +58,30 @@ const VERSION_FIELDS = [
 let javaReady = false;
 let startupPhase = 'pre-java';
 let sequence = 0;
+const probeStartMs = Date.now();
 let Throwable = null;
 let javaInstrumentationInstalled = false;
 let javaRetryTimer = null;
 let nativeLibraryHookInstalled = false;
+const lifecycleState = {
+  attachBaseContextEntered: false,
+  attachBaseContextReturned: false,
+  onCreateEntered: false,
+  onCreateReturned: false
+};
 const pendingClassHookNames = {};
 
 function now() {
   return new Date().toISOString();
 }
 
+function elapsedMs() {
+  return Date.now() - probeStartMs;
+}
+
 function log(message) {
   sequence += 1;
-  console.log(`[${TAG} #${sequence} ${now()} phase=${startupPhase}] ${message}`);
+  console.log(`[${TAG} #${sequence} ${now()} elapsedMs=${elapsedMs()} phase=${startupPhase}] ${message}`);
 }
 
 function safeString(value) {
@@ -99,6 +110,64 @@ function currentJavaStack() {
   } catch (error) {
     return `<current stack unavailable: ${error}>`;
   }
+}
+
+function currentJavaStackFrames() {
+  try {
+    const Exception = Java.use('java.lang.Exception');
+    const frames = Exception.$new().getStackTrace();
+    const out = [];
+    for (let i = 0; i < frames.length; i += 1) {
+      out.push(safeString(frames[i]));
+    }
+    return out;
+  } catch (error) {
+    return [`<current stack unavailable: ${error}>`];
+  }
+}
+
+function currentJavaThreadName() {
+  try {
+    const Thread = Java.use('java.lang.Thread');
+    return safeString(Thread.currentThread().getName());
+  } catch (error) {
+    return `<thread name unavailable: ${error}>`;
+  }
+}
+
+function currentProcessPackageName() {
+  const parts = [];
+  try {
+    const ActivityThread = Java.use('android.app.ActivityThread');
+    parts.push(`currentPackageName=${safeString(ActivityThread.currentPackageName())}`);
+  } catch (error) {
+    parts.push(`currentPackageName=<unavailable: ${error}>`);
+  }
+  try {
+    const Application = Java.use('android.app.Application');
+    const app = Application.getProcessName();
+    parts.push(`processName=${safeString(app)}`);
+  } catch (error) {
+    parts.push(`processName=<unavailable: ${error}>`);
+  }
+  return parts.join(' ');
+}
+
+function formatLifecycleState() {
+  return `attachBaseContextEntered=${lifecycleState.attachBaseContextEntered} attachBaseContextReturned=${lifecycleState.attachBaseContextReturned} onCreateEntered=${lifecycleState.onCreateEntered} onCreateReturned=${lifecycleState.onCreateReturned}`;
+}
+
+function describeJavaObject(value) {
+  if (value === null || value === undefined) {
+    return `class=${safeString(value)} value=${safeString(value)}`;
+  }
+  let className = '<class unavailable>';
+  try {
+    className = safeString(value.getClass().getName());
+  } catch (error) {
+    className = `<class unavailable: ${error}>`;
+  }
+  return `class=${className} value=${safeString(value)}`;
 }
 
 
@@ -372,12 +441,14 @@ function hookProtectedApplication() {
   attachBaseContext.implementation = function (context) {
     const previousPhase = startupPhase;
     startupPhase = 'attachBaseContext';
+    lifecycleState.attachBaseContextEntered = true;
     log('ProtectedMyApplication.attachBaseContext enter');
     logBuildSnapshot('attachBaseContext-enter');
     try {
       return attachBaseContext.call(this, context);
     } finally {
       logBuildSnapshot('attachBaseContext-exit');
+      lifecycleState.attachBaseContextReturned = true;
       log('ProtectedMyApplication.attachBaseContext exit');
       startupPhase = previousPhase;
     }
@@ -387,12 +458,14 @@ function hookProtectedApplication() {
   onCreate.implementation = function () {
     const previousPhase = startupPhase;
     startupPhase = 'onCreate';
+    lifecycleState.onCreateEntered = true;
     log('ProtectedMyApplication.onCreate enter');
     logBuildSnapshot('onCreate-enter');
     try {
       return onCreate.call(this);
     } finally {
       logBuildSnapshot('onCreate-exit');
+      lifecycleState.onCreateReturned = true;
       log('ProtectedMyApplication.onCreate exit');
       startupPhase = previousPhase;
     }
@@ -1015,6 +1088,45 @@ function hookNativeLibraryLoading() {
 }
 
 
+
+function hookConnectivityManagerGetDefaultProxy() {
+  const ConnectivityManager = Java.use('android.net.ConnectivityManager');
+  const getDefaultProxy = ConnectivityManager.getDefaultProxy.overload();
+
+  getDefaultProxy.implementation = function () {
+    const frames = currentJavaStackFrames();
+    const immediateCaller = frames.length > 2 ? frames[2] : '<caller unavailable>';
+    log(`ConnectivityManager.getDefaultProxy enter timestamp=${now()} elapsedMs=${elapsedMs()} thread=${currentJavaThreadName()} pid=${currentPid()} ${currentProcessPackageName()} immediateCaller=${immediateCaller} lifecycle=${formatLifecycleState()} stack=${frames.join(' <= ')}`);
+
+    try {
+      const result = getDefaultProxy.call(this);
+      log(`ConnectivityManager.getDefaultProxy return success ${describeJavaObject(result)}`);
+      return result;
+    } catch (error) {
+      let exceptionClass = '<exception class unavailable>';
+      let exceptionMessage = '<exception message unavailable>';
+      let exceptionStack = '<exception stack unavailable>';
+      try {
+        exceptionClass = error && error.getClass ? safeString(error.getClass().getName()) : safeString(error);
+      } catch (classError) {
+        exceptionClass = `<exception class unavailable: ${classError}>`;
+      }
+      try {
+        exceptionMessage = error && error.getMessage ? safeString(error.getMessage()) : '<no getMessage>';
+      } catch (messageError) {
+        exceptionMessage = `<exception message unavailable: ${messageError}>`;
+      }
+      try {
+        exceptionStack = error ? stackOf(error) : '<null exception>';
+      } catch (stackError) {
+        exceptionStack = `<exception stack unavailable: ${stackError}>`;
+      }
+      log(`ConnectivityManager.getDefaultProxy THROW class=${exceptionClass} message=${exceptionMessage} stack=${exceptionStack}`);
+      throw error;
+    }
+  };
+}
+
 function hookJavaUncaughtExceptions() {
   const Thread = Java.use('java.lang.Thread');
   const dispatch = Thread.dispatchUncaughtException.overload('java.lang.Throwable');
@@ -1102,6 +1214,7 @@ function installJavaInstrumentation(reason) {
     installSafely('MessageGuardException logging', hookMessageGuardException);
     installSafely('ProtectedMyApplication startup logging', hookProtectedApplication);
     installSafely('Java native library loading logging', hookJavaLibraryLoading);
+    installSafely('ConnectivityManager.getDefaultProxy logging', hookConnectivityManagerGetDefaultProxy);
     installSafely('Java uncaught exception logging', hookJavaUncaughtExceptions);
     installSafely('ClassLoader observation', hookClassLoaderObservation);
     logBuildSnapshot('initial-java-perform');
