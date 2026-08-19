@@ -21,8 +21,9 @@
 const TAG = 'npv-zinq-readonly-decision-path-observer';
 const APP_CLASS = 'com.napsternetlabs.napsternetv.ProtectedMyApplication';
 const TARGET_MESSAGE = 'DP:786';
-const MAX_EVENTS = 8192;
-const MAX_DUMP = 320;
+const MAX_EVENTS = 16384;
+const MAX_DUMP = 512;
+const MAX_READ_PREVIEW = 256;
 const startedAt = Date.now();
 let seq = 0;
 let stalkedTid = null;
@@ -38,6 +39,24 @@ function tid() { try { return Process.getCurrentThreadId(); } catch (_) { return
 function s(v) { return `${v}`; }
 function log(msg) { seq += 1; console.log(`[${TAG} #${seq} ${now()} +${elapsedMs()}ms pid=${Process.id} tid=${tid()} thread=${threadName()}] ${msg}`); }
 function cstr(p) { try { const q = ptr(p); return q.isNull() ? '<null>' : q.readCString(); } catch (e) { return `<cstr-failed:${s(e)}>`; } }
+function u8preview(p, n) {
+  try {
+    const q = ptr(p);
+    if (q.isNull()) return '<null>';
+    const len = Math.max(0, Math.min(Number(n), MAX_READ_PREVIEW));
+    if (len === 0) return '<empty>';
+    const bytes = q.readByteArray(len);
+    if (bytes === null) return '<null-bytes>';
+    return hexdump(bytes, { offset: 0, length: len, header: false, ansi: false }).replace(/\n/g, ' | ');
+  } catch (e) { return `<bytes-failed:${s(e)}>`; }
+}
+function readlinkTarget(buf, rv) {
+  try {
+    const n = rv.toInt32();
+    if (n <= 0) return '<unread>';
+    return ptr(buf).readUtf8String(n);
+  } catch (e) { return `<readlink-target-failed:${s(e)}>`; }
+}
 function initThreadName() {
   try { const p = Module.findExportByName(null, 'pthread_self'); if (p) pthreadSelf = new NativeFunction(p, 'pointer', []); } catch (_) {}
   try { const p = Module.findExportByName(null, 'pthread_getname_np'); if (p) pthreadGetnameNp = new NativeFunction(p, 'int', ['pointer', 'pointer', 'ulong']); } catch (_) {}
@@ -98,19 +117,46 @@ function start(reason) {
   }});
 }
 function stop(reason) { if (!stalking) return; try { Stalker.unfollow(stalkedTid); Stalker.garbageCollect(); } catch (e) { log(`UNKNOWN_STALKER_STOP_ERROR reason=${reason} error=${s(e)}`); } log(`PROVEN_STALKER_STOP reason=${reason} stalkedTid=${stalkedTid}`); stalking = false; stalkedTid = null; }
-function hookExport(name, ret, args, render) {
-  const p = Module.findExportByName(null, name); if (!p) return;
-  Interceptor.attach(p, { onEnter(argv) { if (stalking && tid() === stalkedTid) { this.npv = true; this.argv = argv; this.bt = bt(this.context); } }, onLeave(rv) { if (this.npv) remember(`env-${name}`, `${fmt('api', p)} return=${rv} ${render ? render(this.argv, rv) : ''} nativeBacktrace=${this.bt}`); } });
+function hookExport(name, renderEnter, renderLeave) {
+  const p = Module.findExportByName(null, name);
+  if (!p) { log(`UNKNOWN_ENV_HOOK_MISSING name=${name}`); return; }
+  Interceptor.attach(p, {
+    onEnter(argv) {
+      if (stalking && tid() === stalkedTid) {
+        this.npv = true;
+        this.argv = argv;
+        this.caller = this.returnAddress;
+        this.ctx = this.context;
+        this.bt = bt(this.context);
+        this.enterDetail = renderEnter ? renderEnter(argv) : '';
+      }
+    },
+    onLeave(rv) {
+      if (this.npv) remember(`env-${name}`, `${fmt('api', p)} caller=${fmt('caller', this.caller)} return=${rv} ${this.enterDetail} ${renderLeave ? renderLeave(this.argv, rv) : ''} nativeBacktrace=${this.bt}`);
+    }
+  });
   log(`PROVEN_ENV_HOOK_INSTALLED name=${name} ${fmt('api', p)}`);
 }
 
 initThreadName();
 Process.setExceptionHandler(details => { log(`NATIVE_EXCEPTION_OBSERVED type=${details.type} ${fmt('fault', details.address)} nativeBacktrace=${bt(details.context)}`); dump('native-exception'); return false; });
-hookExport('__system_property_get', 'int', ['pointer', 'pointer'], (a, rv) => `key=${cstr(a[0])} value=${cstr(a[1])}`);
-hookExport('openat', 'int', ['int', 'pointer', 'int', 'int'], a => `path=${cstr(a[1])}`);
-hookExport('open', 'int', ['pointer', 'int'], a => `path=${cstr(a[0])}`);
-hookExport('access', 'int', ['pointer', 'int'], a => `path=${cstr(a[0])}`);
-hookExport('readlinkat', 'int', ['int', 'pointer', 'pointer', 'ulong'], (a, rv) => `path=${cstr(a[1])} target=${rv.toInt32() > 0 ? cstr(a[2]) : '<unread>'}`);
+hookExport('__system_property_get', a => `key=${cstr(a[0])}`, (a, rv) => `value=${cstr(a[1])}`);
+hookExport('__system_property_read', a => `propInfo=${a[0]}`, (a, rv) => `name=${cstr(a[1])} value=${cstr(a[2])}`);
+hookExport('__system_property_read_callback', a => `propInfo=${a[0]} callback=${fmt('callback', a[1])} cookie=${a[2]}`, null);
+hookExport('openat', a => `dirfd=${a[0]} path=${cstr(a[1])} flags=${a[2]} mode=${a[3]}`, null);
+hookExport('openat64', a => `dirfd=${a[0]} path=${cstr(a[1])} flags=${a[2]} mode=${a[3]}`, null);
+hookExport('open', a => `path=${cstr(a[0])} flags=${a[1]} mode=${a[2]}`, null);
+hookExport('open64', a => `path=${cstr(a[0])} flags=${a[1]} mode=${a[2]}`, null);
+hookExport('read', a => `fd=${a[0]} buf=${a[1]} count=${a[2]}`, (a, rv) => `readPreview=${rv.toInt32 && rv.toInt32() > 0 ? u8preview(a[1], rv.toInt32()) : '<unread>'}`);
+hookExport('readlink', a => `path=${cstr(a[0])} buf=${a[1]} size=${a[2]}`, (a, rv) => `target=${readlinkTarget(a[1], rv)}`);
+hookExport('readlinkat', a => `dirfd=${a[0]} path=${cstr(a[1])} buf=${a[2]} size=${a[3]}`, (a, rv) => `target=${readlinkTarget(a[2], rv)}`);
+hookExport('access', a => `path=${cstr(a[0])} mode=${a[1]}`, null);
+hookExport('stat', a => `path=${cstr(a[0])} statbuf=${a[1]}`, null);
+hookExport('stat64', a => `path=${cstr(a[0])} statbuf=${a[1]}`, null);
+hookExport('lstat', a => `path=${cstr(a[0])} statbuf=${a[1]}`, null);
+hookExport('lstat64', a => `path=${cstr(a[0])} statbuf=${a[1]}`, null);
+hookExport('fstatat', a => `dirfd=${a[0]} path=${cstr(a[1])} statbuf=${a[2]} flags=${a[3]}`, null);
+hookExport('fstatat64', a => `dirfd=${a[0]} path=${cstr(a[1])} statbuf=${a[2]} flags=${a[3]}`, null);
 
 Java.perform(() => {
   const Log = Java.use('android.util.Log');
